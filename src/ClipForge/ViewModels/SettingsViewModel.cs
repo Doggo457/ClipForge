@@ -19,6 +19,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private readonly AppSettings _settings;
     private readonly RecordingProfile _profile;
     private DeviceEnumerator? _deviceEnumerator;
+    private MonitorInfo? _selectedMonitor;
 
     public SettingsViewModel(AppSettings settings)
     {
@@ -34,6 +35,12 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
         VideoDevices = new ObservableCollection<string>();
         AudioDevices = new ObservableCollection<string>();
+
+        Monitors = new ObservableCollection<MonitorInfo>(MonitorEnumerator.GetMonitors());
+        _selectedMonitor =
+            Monitors.FirstOrDefault(m => m.Index == _profile.MonitorIndex)
+            ?? Monitors.FirstOrDefault(m => m.IsPrimary)
+            ?? Monitors.FirstOrDefault();
 
         BrowseOutputFolderCommand = new RelayCommand(_ => BrowseOutputFolder?.Invoke());
         RefreshDevicesCommand = new RelayCommand(async _ => await RefreshDevicesAsync());
@@ -61,6 +68,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public ObservableCollection<RatePreset> Presets { get; }
     public ObservableCollection<string> VideoDevices { get; }
     public ObservableCollection<string> AudioDevices { get; }
+    public ObservableCollection<MonitorInfo> Monitors { get; }
 
     // ----- Commands -----------------------------------------------------
 
@@ -86,6 +94,25 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         get => _profile.MonitorIndex;
         set { if (_profile.MonitorIndex != value) { _profile.MonitorIndex = value; OnPropertyChanged(); } }
+    }
+
+    /// <summary>The monitor to record when <see cref="Source"/> is Monitor.</summary>
+    public MonitorInfo? SelectedMonitor
+    {
+        get => _selectedMonitor;
+        set
+        {
+            if (!ReferenceEquals(_selectedMonitor, value))
+            {
+                _selectedMonitor = value;
+                if (value is not null)
+                {
+                    _profile.MonitorIndex = value.Index;
+                    OnPropertyChanged(nameof(MonitorIndex));
+                }
+                OnPropertyChanged();
+            }
+        }
     }
 
     public int RegionX

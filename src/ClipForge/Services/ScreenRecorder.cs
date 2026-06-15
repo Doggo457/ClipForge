@@ -358,19 +358,7 @@ public sealed class ScreenRecorder
                 break;
 
             case CaptureSource.Monitor:
-                // gdigrab itself has no monitor selector; we offset into the virtual desktop by the
-                // monitor index multiplied by a nominal width. Region fields, when present, override.
-                // For a precise multi-monitor crop the caller should populate the Region fields.
-                if (profile.RegionWidth > 0 && profile.RegionHeight > 0)
-                {
-                    sb.Append(" -offset_x ").Append(profile.RegionX.ToString(CultureInfo.InvariantCulture));
-                    sb.Append(" -offset_y ").Append(profile.RegionY.ToString(CultureInfo.InvariantCulture));
-                    sb.Append(" -video_size ")
-                      .Append(NormalizeEven(profile.RegionWidth).ToString(CultureInfo.InvariantCulture))
-                      .Append('x')
-                      .Append(NormalizeEven(profile.RegionHeight).ToString(CultureInfo.InvariantCulture));
-                }
-                sb.Append(" -i ").Append(Quote("desktop"));
+                AppendMonitorInput(sb, profile);
                 break;
 
             case CaptureSource.Window:
@@ -383,6 +371,39 @@ public sealed class ScreenRecorder
             default:
                 AppendPrimaryFullScreen(sb);
                 break;
+        }
+    }
+
+    /// <summary>
+    /// Captures a specific monitor by its enumerated index, using that monitor's exact bounds in
+    /// virtual-desktop coordinates. Falls back to explicit region fields, then the primary screen.
+    /// </summary>
+    private static void AppendMonitorInput(StringBuilder sb, RecordingProfile profile)
+    {
+        var mon = MonitorEnumerator.GetByIndex(profile.MonitorIndex);
+        if (mon is not null && mon.Width > 0 && mon.Height > 0)
+        {
+            sb.Append(" -offset_x ").Append(mon.X.ToString(CultureInfo.InvariantCulture));
+            sb.Append(" -offset_y ").Append(mon.Y.ToString(CultureInfo.InvariantCulture));
+            sb.Append(" -video_size ")
+              .Append(NormalizeEven(mon.Width).ToString(CultureInfo.InvariantCulture))
+              .Append('x')
+              .Append(NormalizeEven(mon.Height).ToString(CultureInfo.InvariantCulture));
+            sb.Append(" -i ").Append(Quote("desktop"));
+        }
+        else if (profile.RegionWidth > 0 && profile.RegionHeight > 0)
+        {
+            sb.Append(" -offset_x ").Append(profile.RegionX.ToString(CultureInfo.InvariantCulture));
+            sb.Append(" -offset_y ").Append(profile.RegionY.ToString(CultureInfo.InvariantCulture));
+            sb.Append(" -video_size ")
+              .Append(NormalizeEven(profile.RegionWidth).ToString(CultureInfo.InvariantCulture))
+              .Append('x')
+              .Append(NormalizeEven(profile.RegionHeight).ToString(CultureInfo.InvariantCulture));
+            sb.Append(" -i ").Append(Quote("desktop"));
+        }
+        else
+        {
+            AppendPrimaryFullScreen(sb);
         }
     }
 

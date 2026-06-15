@@ -126,6 +126,36 @@ namespace ClipForge.ViewModels
                     // Detection is best-effort; fall back to the software encoder.
                 }
 
+                // Pick a default microphone so "System + Mic" captures both straight away.
+                try
+                {
+                    bool needsMic = _settings.Profiles.Any(p =>
+                        (p.Audio is AudioMode.MicOnly or AudioMode.SystemAndMic) && string.IsNullOrWhiteSpace(p.MicDevice));
+                    if (needsMic)
+                    {
+                        var (_, audioDevices) = await new DeviceEnumerator(_ffmpegPath!).ListDshowDevicesAsync();
+                        var mic = audioDevices.FirstOrDefault(d => d.Contains("micro", StringComparison.OrdinalIgnoreCase))
+                                  ?? audioDevices.FirstOrDefault();
+                        if (mic is not null)
+                        {
+                            bool changed = false;
+                            foreach (var p in _settings.Profiles)
+                            {
+                                if ((p.Audio is AudioMode.MicOnly or AudioMode.SystemAndMic) && string.IsNullOrWhiteSpace(p.MicDevice))
+                                {
+                                    p.MicDevice = mic;
+                                    changed = true;
+                                }
+                            }
+                            if (changed) SettingsService.Save(_settings);
+                        }
+                    }
+                }
+                catch
+                {
+                    // Best-effort; recording still works with system audio only.
+                }
+
                 _recorder = new ScreenRecorder(_ffmpegPath!);
                 _recorder.Started += OnRecorderStarted;
                 _recorder.Stopped += OnRecorderStopped;

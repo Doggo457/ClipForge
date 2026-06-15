@@ -147,10 +147,12 @@
                                   ItemsSource="{Binding CaptureSources}"
                                   SelectedItem="{Binding Source}"/>
 
-                        <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource LabelText}" Text="Monitor index"/>
-                        <TextBox Grid.Row="2" Grid.Column="1"
-                                 Text="{Binding MonitorIndex}"
-                                 IsEnabled="{Binding IsMonitor}"/>
+                        <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource LabelText}" Text="Monitor"/>
+                        <ComboBox Grid.Row="2" Grid.Column="1"
+                                  ItemsSource="{Binding Monitors}"
+                                  SelectedItem="{Binding SelectedMonitor}"
+                                  DisplayMemberPath="Display"
+                                  IsEnabled="{Binding IsMonitor}"/>
 
                         <TextBlock Grid.Row="3" Grid.Column="0" Style="{StaticResource LabelText}" Text="Window title"/>
                         <TextBox Grid.Row="3" Grid.Column="1"

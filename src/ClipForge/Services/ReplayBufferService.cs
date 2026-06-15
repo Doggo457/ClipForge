@@ -363,7 +363,17 @@ public sealed class ReplayBufferService
                 break;
 
             case CaptureSource.Monitor:
-                if (profile.RegionWidth > 0 && profile.RegionHeight > 0)
+                var mon = MonitorEnumerator.GetByIndex(profile.MonitorIndex);
+                if (mon is not null && mon.Width > 0 && mon.Height > 0)
+                {
+                    sb.Append(" -offset_x ").Append(mon.X.ToString(CultureInfo.InvariantCulture));
+                    sb.Append(" -offset_y ").Append(mon.Y.ToString(CultureInfo.InvariantCulture));
+                    sb.Append(" -video_size ")
+                      .Append(NormalizeEven(mon.Width).ToString(CultureInfo.InvariantCulture))
+                      .Append('x')
+                      .Append(NormalizeEven(mon.Height).ToString(CultureInfo.InvariantCulture));
+                }
+                else if (profile.RegionWidth > 0 && profile.RegionHeight > 0)
                 {
                     sb.Append(" -offset_x ").Append(profile.RegionX.ToString(CultureInfo.InvariantCulture));
                     sb.Append(" -offset_y ").Append(profile.RegionY.ToString(CultureInfo.InvariantCulture));
@@ -371,6 +381,17 @@ public sealed class ReplayBufferService
                       .Append(NormalizeEven(profile.RegionWidth).ToString(CultureInfo.InvariantCulture))
                       .Append('x')
                       .Append(NormalizeEven(profile.RegionHeight).ToString(CultureInfo.InvariantCulture));
+                }
+                else
+                {
+                    var (ppw, pph) = NativeMethods.GetPrimaryScreenSize();
+                    if (ppw > 0 && pph > 0)
+                    {
+                        sb.Append(" -offset_x 0 -offset_y 0 -video_size ")
+                          .Append(NormalizeEven(ppw).ToString(CultureInfo.InvariantCulture))
+                          .Append('x')
+                          .Append(NormalizeEven(pph).ToString(CultureInfo.InvariantCulture));
+                    }
                 }
                 sb.Append(" -i ").Append(Quote("desktop"));
                 break;
