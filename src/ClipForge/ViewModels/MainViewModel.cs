@@ -98,6 +98,34 @@ namespace ClipForge.ViewModels
                     SettingsService.Save(_settings);
                 }
 
+                // Adopt GPU hardware encoding when available so recording barely touches the CPU.
+                // Only replace profiles still on the software default (never override a user's choice).
+                try
+                {
+                    StatusText = "Detecting GPU encoder…";
+                    var best = await HardwareEncoderDetector.DetectBestAsync(_ffmpegPath!);
+                    if (best.HasValue)
+                    {
+                        bool changed = false;
+                        foreach (var pr in _settings.Profiles)
+                        {
+                            if (pr.Encoder == VideoEncoder.x264)
+                            {
+                                pr.Encoder = best.Value;
+                                changed = true;
+                            }
+                        }
+                        if (changed)
+                        {
+                            SettingsService.Save(_settings);
+                        }
+                    }
+                }
+                catch
+                {
+                    // Detection is best-effort; fall back to the software encoder.
+                }
+
                 _recorder = new ScreenRecorder(_ffmpegPath!);
                 _recorder.Started += OnRecorderStarted;
                 _recorder.Stopped += OnRecorderStopped;

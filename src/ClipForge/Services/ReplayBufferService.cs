@@ -7,6 +7,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using ClipForge.Models;
+using ClipForge.Utils;
 
 namespace ClipForge.Services;
 
@@ -30,6 +31,7 @@ public sealed class ReplayBufferService
     private Process? _process;
     private string? _bufferDir;
     private RecordingProfile? _profile;
+    private LoopbackCapturePipe? _loopback;
 
     public ReplayBufferService(string ffmpegPath)
     {
@@ -79,7 +81,27 @@ public sealed class ReplayBufferService
 
         var bufferDir = CreateBufferDirectory();
         var wrap = ComputeSegmentWrap(bufferSeconds);
-        var arguments = BuildBufferArguments(profile, bufferDir, wrap);
+
+        // Real system-audio capture via WASAPI loopback for the rolling buffer too.
+        LoopbackInfo? loopbackInfo = null;
+        if (profile.Audio is AudioMode.SystemOnly or AudioMode.SystemAndMic)
+        {
+            try
+            {
+                _loopback = new LoopbackCapturePipe();
+                _loopback.Start();
+                loopbackInfo = new LoopbackInfo(
+                    _loopback.FfmpegInputPath, _loopback.FfmpegFormat,
+                    _loopback.SampleRate, _loopback.Channels);
+            }
+            catch
+            {
+                _loopback?.Dispose();
+                _loopback = null;
+            }
+        }
+
+        var arguments = BuildBufferArguments(profile, bufferDir, wrap, loopbackInfo);
 
         var startInfo = new ProcessStartInfo
         {
@@ -96,6 +118,8 @@ public sealed class ReplayBufferService
         if (!process.Start())
         {
             process.Dispose();
+            _loopback?.Dispose();
+            _loopback = null;
             throw new InvalidOperationException("Failed to start the replay buffer ffmpeg process.");
         }
 
@@ -114,14 +138,18 @@ public sealed class ReplayBufferService
     public void Stop()
     {
         Process? process;
+        LoopbackCapturePipe? loopback;
         lock (_gate)
         {
             process = _process;
             _process = null;
+            loopback = _loopback;
+            _loopback = null;
         }
 
         if (process is null)
         {
+            loopback?.Dispose();
             return;
         }
 
@@ -152,6 +180,7 @@ public sealed class ReplayBufferService
         finally
         {
             process.Dispose();
+            loopback?.Dispose();
         }
     }
 
@@ -257,13 +286,13 @@ public sealed class ReplayBufferService
     /// Builds the segment-muxer command: capture the screen (and audio) and write a rolling ring of
     /// fixed-length .ts segments. <c>-segment_wrap</c> caps the number of files on disk.
     /// </summary>
-    private static string BuildBufferArguments(RecordingProfile profile, string bufferDir, int wrap)
+    private static string BuildBufferArguments(RecordingProfile profile, string bufferDir, int wrap, LoopbackInfo? loopback)
     {
         var sb = new StringBuilder();
         sb.Append("-hide_banner -loglevel error -y");
 
         // Reuse the recorder's input + encoding logic by building the capture portion here.
-        AppendCapture(sb, profile);
+        AppendCapture(sb, profile, loopback);
 
         // Segment muxer: rolling, wrapping, fixed-duration TS files. reset_timestamps keeps each
         // segment independently playable / concatenatable.
@@ -307,7 +336,7 @@ public sealed class ReplayBufferService
     /// Audio (when present) is mixed/mapped; output is forced to a TS-friendly codec set
     /// (H.264 + AAC) so segments concatenate cleanly regardless of profile container.
     /// </summary>
-    private static void AppendCapture(StringBuilder sb, RecordingProfile profile)
+    private static void AppendCapture(StringBuilder sb, RecordingProfile profile, LoopbackInfo? loopback)
     {
         var fps = profile.Fps > 0 ? profile.Fps : 60;
 
@@ -348,19 +377,28 @@ public sealed class ReplayBufferService
 
             case CaptureSource.FullScreen:
             default:
+                var (pw, ph) = NativeMethods.GetPrimaryScreenSize();
+                if (pw > 0 && ph > 0)
+                {
+                    sb.Append(" -offset_x 0 -offset_y 0 -video_size ")
+                      .Append(NormalizeEven(pw).ToString(CultureInfo.InvariantCulture))
+                      .Append('x')
+                      .Append(NormalizeEven(ph).ToString(CultureInfo.InvariantCulture));
+                }
                 sb.Append(" -i ").Append(Quote("desktop"));
                 break;
         }
 
         // ---- Audio inputs ----
-        var audioInputs = AppendAudioInputs(sb, profile);
+        var audioInputs = AppendAudioInputs(sb, profile, loopback);
 
-        // ---- Encoding (TS-friendly: H.264 + AAC, low-latency keyframes aligned to segment len) ----
+        // ---- Encoding (TS-friendly: H.264 + AAC, keyframes aligned to segment length) ----
         var videoCodec = MapTsVideoEncoder(profile.Encoder);
+        bool software = videoCodec.StartsWith("lib", StringComparison.Ordinal);
         sb.Append(" -c:v ").Append(videoCodec);
-        sb.Append(" -pix_fmt yuv420p");
+        sb.Append(" -pix_fmt ").Append(software ? "yuv420p" : "nv12");
 
-        if (videoCodec == "libx264" || videoCodec == "libx265")
+        if (software)
         {
             sb.Append(" -preset ").Append(profile.Preset.ToString());
         }
@@ -369,13 +407,20 @@ public sealed class ReplayBufferService
         {
             var kbps = profile.VideoBitrateKbps.ToString(CultureInfo.InvariantCulture);
             sb.Append(" -b:v ").Append(kbps).Append('k');
-            sb.Append(" -maxrate ").Append(kbps).Append('k');
-            sb.Append(" -bufsize ").Append((profile.VideoBitrateKbps * 2).ToString(CultureInfo.InvariantCulture)).Append('k');
+            if (software)
+            {
+                sb.Append(" -maxrate ").Append(kbps).Append('k');
+                sb.Append(" -bufsize ").Append((profile.VideoBitrateKbps * 2).ToString(CultureInfo.InvariantCulture)).Append('k');
+            }
         }
 
-        // Force a keyframe at every segment boundary so each .ts starts cleanly and concat works.
+        // Keyframe every segment so each .ts starts cleanly and concat works. Software encoders
+        // also get an explicit forced-keyframe expression; hardware encoders rely on -g.
         sb.Append(" -g ").Append((fps * SegmentSeconds).ToString(CultureInfo.InvariantCulture));
-        sb.Append(" -force_key_frames ").Append(Quote($"expr:gte(t,n_forced*{SegmentSeconds})"));
+        if (software)
+        {
+            sb.Append(" -force_key_frames ").Append(Quote($"expr:gte(t,n_forced*{SegmentSeconds})"));
+        }
 
         if (audioInputs == 0)
         {
@@ -402,49 +447,47 @@ public sealed class ReplayBufferService
         }
     }
 
-    private static int AppendAudioInputs(StringBuilder sb, RecordingProfile profile)
+    private static int AppendAudioInputs(StringBuilder sb, RecordingProfile profile, LoopbackInfo? loopback)
     {
-        switch (profile.Audio)
+        bool wantSystem = profile.Audio is AudioMode.SystemOnly or AudioMode.SystemAndMic;
+        bool wantMic = profile.Audio is AudioMode.MicOnly or AudioMode.SystemAndMic;
+        int count = 0;
+
+        if (wantSystem)
         {
-            case AudioMode.SystemOnly:
-                if (!string.IsNullOrWhiteSpace(profile.SystemAudioDevice))
-                {
-                    AppendDshowAudio(sb, profile.SystemAudioDevice!);
-                    return 1;
-                }
-                return 0;
-
-            case AudioMode.MicOnly:
-                if (!string.IsNullOrWhiteSpace(profile.MicDevice))
-                {
-                    AppendDshowAudio(sb, profile.MicDevice!);
-                    return 1;
-                }
-                return 0;
-
-            case AudioMode.SystemAndMic:
-                int count = 0;
-                if (!string.IsNullOrWhiteSpace(profile.SystemAudioDevice))
-                {
-                    AppendDshowAudio(sb, profile.SystemAudioDevice!);
-                    count++;
-                }
-                if (!string.IsNullOrWhiteSpace(profile.MicDevice))
-                {
-                    AppendDshowAudio(sb, profile.MicDevice!);
-                    count++;
-                }
-                return count;
-
-            case AudioMode.None:
-            default:
-                return 0;
+            if (loopback is not null)
+            {
+                AppendPipeAudio(sb, loopback);
+                count++;
+            }
+            else if (!string.IsNullOrWhiteSpace(profile.SystemAudioDevice))
+            {
+                AppendDshowAudio(sb, profile.SystemAudioDevice!);
+                count++;
+            }
         }
+
+        if (wantMic && !string.IsNullOrWhiteSpace(profile.MicDevice))
+        {
+            AppendDshowAudio(sb, profile.MicDevice!);
+            count++;
+        }
+
+        return count;
+    }
+
+    private static void AppendPipeAudio(StringBuilder sb, LoopbackInfo loopback)
+    {
+        sb.Append(" -thread_queue_size 1024");
+        sb.Append(" -f ").Append(loopback.Format);
+        sb.Append(" -ar ").Append(loopback.SampleRate.ToString(CultureInfo.InvariantCulture));
+        sb.Append(" -ac ").Append(loopback.Channels.ToString(CultureInfo.InvariantCulture));
+        sb.Append(" -i ").Append(Quote(loopback.InputPath));
     }
 
     private static void AppendDshowAudio(StringBuilder sb, string deviceName)
     {
-        sb.Append(" -f dshow -i ").Append(Quote($"audio={deviceName}"));
+        sb.Append(" -thread_queue_size 1024 -f dshow -i ").Append(Quote($"audio={deviceName}"));
     }
 
     /// <summary>

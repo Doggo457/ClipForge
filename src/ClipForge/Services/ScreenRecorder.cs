@@ -5,6 +5,7 @@ using System.IO;
 using System.Text;
 using System.Threading.Tasks;
 using ClipForge.Models;
+using ClipForge.Utils;
 
 namespace ClipForge.Services;
 
@@ -16,6 +17,7 @@ public sealed class ScreenRecorder
 {
     private readonly string _ffmpegPath;
     private Process? _process;
+    private LoopbackCapturePipe? _loopback;
     private readonly object _gate = new();
 
     public ScreenRecorder(string ffmpegPath)
@@ -72,14 +74,36 @@ public sealed class ScreenRecorder
 
         string outputPath;
         string arguments;
+        LoopbackInfo? loopbackInfo = null;
         try
         {
             outputPath = ResolveOutputPath(profile);
             Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
-            arguments = BuildArguments(profile, outputPath);
+
+            // Real system-audio capture via WASAPI loopback — no "Stereo Mix" device needed.
+            if (profile.Audio is AudioMode.SystemOnly or AudioMode.SystemAndMic)
+            {
+                try
+                {
+                    _loopback = new LoopbackCapturePipe();
+                    _loopback.Start();
+                    loopbackInfo = new LoopbackInfo(
+                        _loopback.FfmpegInputPath, _loopback.FfmpegFormat,
+                        _loopback.SampleRate, _loopback.Channels);
+                }
+                catch
+                {
+                    _loopback?.Dispose();
+                    _loopback = null; // fall back to a configured dshow system device, if any
+                }
+            }
+
+            arguments = BuildArgumentsCore(profile, outputPath, loopbackInfo);
         }
         catch (Exception ex)
         {
+            _loopback?.Dispose();
+            _loopback = null;
             Error?.Invoke(this, $"Failed to prepare recording: {ex.Message}");
             return Task.CompletedTask;
         }
@@ -106,6 +130,8 @@ public sealed class ScreenRecorder
             {
                 Error?.Invoke(this, "ffmpeg process failed to start.");
                 process.Dispose();
+                _loopback?.Dispose();
+                _loopback = null;
                 return Task.CompletedTask;
             }
 
@@ -114,6 +140,8 @@ public sealed class ScreenRecorder
         }
         catch (Exception ex)
         {
+            _loopback?.Dispose();
+            _loopback = null;
             Error?.Invoke(this, $"Unable to launch ffmpeg: {ex.Message}");
             return Task.CompletedTask;
         }
@@ -214,6 +242,11 @@ public sealed class ScreenRecorder
         var path = output ?? string.Empty;
         CurrentOutputPath = null;
 
+        // Stop WASAPI loopback capture now that ffmpeg has exited.
+        var loopback = _loopback;
+        _loopback = null;
+        loopback?.Dispose();
+
         // ffmpeg returns 0 on a clean 'q' stop. Exit code 255 is the conventional result of an
         // interrupt; treat it as a successful user-initiated stop because the file is still finalized.
         if (exitCode == 0 || exitCode == 255)
@@ -262,6 +295,9 @@ public sealed class ScreenRecorder
     /// Exposed for unit testing.
     /// </summary>
     public static string BuildArguments(RecordingProfile profile, string outputPath)
+        => BuildArgumentsCore(profile, outputPath, null);
+
+    internal static string BuildArgumentsCore(RecordingProfile profile, string outputPath, LoopbackInfo? loopback)
     {
         if (profile is null)
         {
@@ -281,8 +317,8 @@ public sealed class ScreenRecorder
         // ---- Video input (gdigrab) ----
         AppendVideoInput(sb, profile);
 
-        // ---- Audio input (dshow), if any ----
-        var audioInputs = AppendAudioInputs(sb, profile);
+        // ---- Audio inputs (WASAPI loopback pipe and/or dshow), if any ----
+        var audioInputs = AppendAudioInputs(sb, profile, loopback);
 
         // ---- Encoding / mapping ----
         AppendEncoding(sb, profile, audioInputs);
@@ -345,59 +381,75 @@ public sealed class ScreenRecorder
 
             case CaptureSource.FullScreen:
             default:
-                sb.Append(" -i ").Append(Quote("desktop"));
+                AppendPrimaryFullScreen(sb);
                 break;
         }
+    }
+
+    /// <summary>
+    /// Full-screen capture bounded to the primary monitor. gdigrab "desktop" alone spans the whole
+    /// multi-monitor virtual desktop, which can exceed a hardware encoder's max width and records
+    /// every monitor; bounding to the primary screen fixes both.
+    /// </summary>
+    private static void AppendPrimaryFullScreen(StringBuilder sb)
+    {
+        var (w, h) = NativeMethods.GetPrimaryScreenSize();
+        if (w > 0 && h > 0)
+        {
+            sb.Append(" -offset_x 0 -offset_y 0 -video_size ")
+              .Append(NormalizeEven(w).ToString(CultureInfo.InvariantCulture))
+              .Append('x')
+              .Append(NormalizeEven(h).ToString(CultureInfo.InvariantCulture));
+        }
+        sb.Append(" -i ").Append(Quote("desktop"));
     }
 
     /// <summary>
     /// Appends one or two dshow audio inputs depending on <see cref="AudioMode"/>.
     /// Returns the number of audio inputs added (0, 1 or 2).
     /// </summary>
-    private static int AppendAudioInputs(StringBuilder sb, RecordingProfile profile)
+    private static int AppendAudioInputs(StringBuilder sb, RecordingProfile profile, LoopbackInfo? loopback)
     {
-        switch (profile.Audio)
+        bool wantSystem = profile.Audio is AudioMode.SystemOnly or AudioMode.SystemAndMic;
+        bool wantMic = profile.Audio is AudioMode.MicOnly or AudioMode.SystemAndMic;
+        int count = 0;
+
+        if (wantSystem)
         {
-            case AudioMode.SystemOnly:
-                if (!string.IsNullOrWhiteSpace(profile.SystemAudioDevice))
-                {
-                    AppendDshowAudio(sb, profile.SystemAudioDevice!);
-                    return 1;
-                }
-                return 0;
-
-            case AudioMode.MicOnly:
-                if (!string.IsNullOrWhiteSpace(profile.MicDevice))
-                {
-                    AppendDshowAudio(sb, profile.MicDevice!);
-                    return 1;
-                }
-                return 0;
-
-            case AudioMode.SystemAndMic:
-                int count = 0;
-                if (!string.IsNullOrWhiteSpace(profile.SystemAudioDevice))
-                {
-                    AppendDshowAudio(sb, profile.SystemAudioDevice!);
-                    count++;
-                }
-                if (!string.IsNullOrWhiteSpace(profile.MicDevice))
-                {
-                    AppendDshowAudio(sb, profile.MicDevice!);
-                    count++;
-                }
-                return count;
-
-            case AudioMode.None:
-            default:
-                return 0;
+            if (loopback is not null)
+            {
+                AppendPipeAudio(sb, loopback);   // real WASAPI loopback (system/desktop audio)
+                count++;
+            }
+            else if (!string.IsNullOrWhiteSpace(profile.SystemAudioDevice))
+            {
+                AppendDshowAudio(sb, profile.SystemAudioDevice!); // fallback: configured dshow device
+                count++;
+            }
         }
+
+        if (wantMic && !string.IsNullOrWhiteSpace(profile.MicDevice))
+        {
+            AppendDshowAudio(sb, profile.MicDevice!);
+            count++;
+        }
+
+        return count;
+    }
+
+    private static void AppendPipeAudio(StringBuilder sb, LoopbackInfo loopback)
+    {
+        sb.Append(" -thread_queue_size 1024");
+        sb.Append(" -f ").Append(loopback.Format);
+        sb.Append(" -ar ").Append(loopback.SampleRate.ToString(CultureInfo.InvariantCulture));
+        sb.Append(" -ac ").Append(loopback.Channels.ToString(CultureInfo.InvariantCulture));
+        sb.Append(" -i ").Append(Quote(loopback.InputPath));
     }
 
     private static void AppendDshowAudio(StringBuilder sb, string deviceName)
     {
         // dshow device specifier: audio=<device name>. The whole token is quoted to survive spaces.
-        sb.Append(" -f dshow -i ").Append(Quote($"audio={deviceName}"));
+        sb.Append(" -thread_queue_size 1024 -f dshow -i ").Append(Quote($"audio={deviceName}"));
     }
 
     /// <summary>
@@ -416,25 +468,30 @@ public sealed class ScreenRecorder
 
         // ----- Video codec -----
         var videoCodec = MapVideoEncoder(profile.Encoder, profile.Container);
+        bool software = IsSoftwareEncoder(profile.Encoder);
         sb.Append(" -c:v ").Append(videoCodec);
 
-        // pix_fmt yuv420p ensures broad player compatibility (gdigrab yields bgra).
-        sb.Append(" -pix_fmt yuv420p");
+        // Hardware encoders (NVENC/AMF/QSV) want NV12; software encoders use yuv420p.
+        // gdigrab yields BGRA, which ffmpeg converts to the requested format.
+        sb.Append(" -pix_fmt ").Append(software ? "yuv420p" : "nv12");
 
-        // Software x264/x265 honor the speed preset; hardware encoders use their own preset names,
-        // so we only emit -preset for the software encoders.
-        if (IsSoftwareEncoder(profile.Encoder))
+        // Only software x264/x265 honor the -preset speed names.
+        if (software)
         {
             sb.Append(" -preset ").Append(profile.Preset.ToString());
         }
 
-        // Bitrate target (CBR-ish): -b:v plus a matching maxrate/bufsize for predictable file size.
+        // Bitrate target. Software gets a CBR-ish maxrate/bufsize; hardware encoders (esp. AMF)
+        // reject those, so they just take -b:v.
         if (profile.VideoBitrateKbps > 0)
         {
             var kbps = profile.VideoBitrateKbps.ToString(CultureInfo.InvariantCulture);
             sb.Append(" -b:v ").Append(kbps).Append('k');
-            sb.Append(" -maxrate ").Append(kbps).Append('k');
-            sb.Append(" -bufsize ").Append((profile.VideoBitrateKbps * 2).ToString(CultureInfo.InvariantCulture)).Append('k');
+            if (software)
+            {
+                sb.Append(" -maxrate ").Append(kbps).Append('k');
+                sb.Append(" -bufsize ").Append((profile.VideoBitrateKbps * 2).ToString(CultureInfo.InvariantCulture)).Append('k');
+            }
         }
 
         // Keyframe roughly every 2 seconds for seekability.
