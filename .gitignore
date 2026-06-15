@@ -1,5 +1,5 @@
 ## ----------------------------------------------------------------------------
-## ClipForge .gitignore  (Visual Studio / .NET / Rider)
+## Fragment .gitignore  (Visual Studio / .NET / Rider)
 ## ----------------------------------------------------------------------------
 
 # Build output
@@ -51,14 +51,14 @@ coverage*.info
 .roslyn/
 
 # ----------------------------------------------------------------------------
-# ClipForge-specific
+# Fragment-specific
 # ----------------------------------------------------------------------------
 
 # Bundled FFmpeg binaries are distributed separately, not committed
 /ffmpeg/*.exe
 /ffmpeg/*.dll
-src/ClipForge/ffmpeg/*.exe
-src/ClipForge/ffmpeg/*.dll
+src/Fragment/ffmpeg/*.exe
+src/Fragment/ffmpeg/*.dll
 **/ffmpeg/ffmpeg.exe
 **/ffmpeg/ffprobe.exe
 

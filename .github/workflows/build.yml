@@ -21,16 +21,16 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Restore
-        run: dotnet restore ClipForge.sln
+        run: dotnet restore Fragment.sln
 
       - name: Build (Release)
-        run: dotnet build ClipForge.sln -c Release --no-restore
+        run: dotnet build Fragment.sln -c Release --no-restore
 
       - name: Publish (framework-dependent)
-        run: dotnet publish src/ClipForge/ClipForge.csproj -c Release -o publish --no-restore
+        run: dotnet publish src/Fragment/Fragment.csproj -c Release -o publish --no-restore
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ClipForge-win
+          name: Fragment-win
           path: publish

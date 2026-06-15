@@ -1,4 +1,4 @@
-# ClipForge — Technical Plan
+# Fragment — Technical Plan
 
 > A Windows-native screen recorder and instant clipper built on .NET 8 + WPF, with all
 > capture and encoding delegated to a bundled FFmpeg binary.
@@ -7,7 +7,7 @@
 
 ## 1. Overview
 
-**ClipForge** is a desktop GUI application for Windows that records the screen and produces
+**Fragment** is a desktop GUI application for Windows that records the screen and produces
 short, shareable clips on demand. It is aimed at gamers, streamers, bug-reporters, and
 tutorial authors who want OBS-grade capture without the configuration burden, plus a
 "Shadowplay-style" always-on replay buffer so the last *N* seconds can be saved
@@ -66,7 +66,7 @@ persisted as JSON via `System.Text.Json`.
 | Device enumeration   | FFmpeg `-list_devices` (dshow)      | Single source of truth — the same names FFmpeg will accept on the command line. |
 
 **Why shell out to FFmpeg instead of binding a library (FFmpeg.AutoGen / FFMediaToolkit)?**
-- Process isolation: a decoder/encoder fault kills `ffmpeg.exe`, not ClipForge.
+- Process isolation: a decoder/encoder fault kills `ffmpeg.exe`, not Fragment.
 - The CLI surface is stable and trivially testable — `BuildArguments` is a pure function.
 - Updating FFmpeg is "drop in a new exe", no ABI/marshalling concerns.
 - The replay buffer maps perfectly onto the `segment` muxer + `concat` demuxer, which are
@@ -76,7 +76,7 @@ persisted as JSON via `System.Text.Json`.
 
 ## 4. Architecture
 
-ClipForge is layered: **Views** (XAML) → **ViewModels** (state + commands) → **Services**
+Fragment is layered: **Views** (XAML) → **ViewModels** (state + commands) → **Services**
 (FFmpeg orchestration, hotkeys, settings, device discovery) → **Models** (POCO settings &
 enums) and **Utils** (`RelayCommand`, P/Invoke).
 
@@ -130,16 +130,16 @@ enums) and **Utils** (`RelayCommand`, P/Invoke).
 
 ### Project / namespace layout
 ```
-src/ClipForge/
-  ClipForge.csproj
-  App.xaml / App.xaml.cs                     -> namespace ClipForge
-  MainWindow.xaml / .cs                       -> namespace ClipForge
+src/Fragment/
+  Fragment.csproj
+  App.xaml / App.xaml.cs                     -> namespace Fragment
+  MainWindow.xaml / .cs                       -> namespace Fragment
   Models/
-    Enums.cs                                  -> ClipForge.Models
-    RecordingProfile.cs                       -> ClipForge.Models
-    AppSettings.cs                            -> ClipForge.Models
+    Enums.cs                                  -> Fragment.Models
+    RecordingProfile.cs                       -> Fragment.Models
+    AppSettings.cs                            -> Fragment.Models
   Services/
-    FfmpegLocator.cs                          -> ClipForge.Services
+    FfmpegLocator.cs                          -> Fragment.Services
     ScreenRecorder.cs
     ReplayBufferService.cs
     ClipTrimmer.cs
@@ -147,13 +147,13 @@ src/ClipForge/
     SettingsService.cs
     DeviceEnumerator.cs
   ViewModels/
-    MainViewModel.cs                          -> ClipForge.ViewModels
+    MainViewModel.cs                          -> Fragment.ViewModels
     SettingsViewModel.cs
   Views/
-    SettingsWindow.xaml / .cs                 -> ClipForge.Views
+    SettingsWindow.xaml / .cs                 -> Fragment.Views
     TrimmerWindow.xaml / .cs
   Utils/
-    RelayCommand.cs                           -> ClipForge.Utils
+    RelayCommand.cs                           -> Fragment.Utils
     NativeMethods.cs
   ffmpeg/                                      -> bundled ffmpeg.exe (gitignored)
 ```
@@ -192,7 +192,7 @@ src/ClipForge/
 
 ## 6. Clipping Design (the heart of the app)
 
-ClipForge offers **two independent clipping strategies**. They are complementary: the ring
+Fragment offers **two independent clipping strategies**. They are complementary: the ring
 buffer is for *retroactive* "save what just happened", the record-then-trim path is for
 *deliberate* "record a session, then cut highlights".
 
@@ -319,7 +319,7 @@ only the last-resort fallback after a grace period.
 
 ---
 
-## 8. Settings Schema (`%AppData%\ClipForge\settings.json`)
+## 8. Settings Schema (`%AppData%\Fragment\settings.json`)
 
 `AppSettings`:
 ```jsonc
@@ -357,8 +357,8 @@ only the last-resort fallback after a grace period.
   "SystemAudioDevice": null,
   "MicDevice": null,
   "AudioBitrateKbps": 160,
-  "OutputFolder": "%USERPROFILE%\\Videos\\ClipForge",
-  "FileNameTemplate": "ClipForge_{date}_{time}"
+  "OutputFolder": "%USERPROFILE%\\Videos\\Fragment",
+  "FileNameTemplate": "Fragment_{date}_{time}"
 }
 ```
 
@@ -389,7 +389,7 @@ only the last-resort fallback after a grace period.
 **MainWindow** (compact control panel, dark, accent `#00b3ff`):
 ```
 +--------------------------------------------------+
-|  ClipForge                              [ _ ][x] |
+|  Fragment                              [ _ ][x] |
 +--------------------------------------------------+
 |  Profile: [ Default            v ]               |
 |                                                  |
@@ -443,12 +443,12 @@ via `SettingsService`.
 # from repo root
 dotnet restore
 dotnet build -c Release
-dotnet run --project src/ClipForge/ClipForge.csproj
+dotnet run --project src/Fragment/Fragment.csproj
 ```
 
 Publish a self-contained single file:
 ```powershell
-dotnet publish src/ClipForge/ClipForge.csproj -c Release -r win-x64 `
+dotnet publish src/Fragment/Fragment.csproj -c Release -r win-x64 `
   --self-contained true -p:PublishSingleFile=true -o publish
 # then copy ffmpeg.exe into publish\ffmpeg\ffmpeg.exe
 ```
@@ -470,7 +470,7 @@ a clear "FFmpeg not found" status and the record/replay actions are disabled.
 - *Recommended:* ship a known-good static FFmpeg build in `ffmpeg/` (gitignored so the binary
   is not committed; CI/release packaging downloads it).
 - *Lightweight installer:* a first-run helper could download a pinned FFmpeg release and place
-  it in `%AppData%\ClipForge\ffmpeg`.
+  it in `%AppData%\Fragment\ffmpeg`.
 - We do not vendor FFmpeg source or link it; we only invoke the CLI, which keeps licensing
   clean (FFmpeg LGPL/GPL stays in its own binary).
 
