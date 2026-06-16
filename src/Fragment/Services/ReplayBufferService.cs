@@ -431,11 +431,6 @@ public sealed class ReplayBufferService
         sb.Append(" -framerate ").Append(fps.ToString(CultureInfo.InvariantCulture));
         sb.Append(" -draw_mouse ").Append(profile.CaptureCursor ? '1' : '0');
 
-        // Buffer the capture input so the gdigrab reader is never starved by the audio inputs (which
-        // already carry a queue). A starved reader stalls and then jumps to catch up, dropping frame
-        // bursts unevenly across segments; this smooths the flow. See ScreenRecorder for detail.
-        sb.Append(" -thread_queue_size 1024 -rtbufsize 256M");
-
         switch (profile.Source)
         {
             case CaptureSource.Region:
@@ -533,11 +528,6 @@ public sealed class ReplayBufferService
         {
             sb.Append(" -force_key_frames ").Append(Quote($"expr:gte(t,n_forced*{SegmentSeconds})"));
         }
-
-        // Constant frame rate: gdigrab's wall-clock timestamps jitter, so force an exact 1/fps
-        // cadence. Evenly spaced PTS also keep -segment_time landing on consistent frame counts so
-        // the .ts segments concatenate without timing drift. Applies to the video stream only.
-        sb.Append(" -fps_mode cfr -r ").Append(fps.ToString(CultureInfo.InvariantCulture));
 
         if (audioInputs == 0)
         {
