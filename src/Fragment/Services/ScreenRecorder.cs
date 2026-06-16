@@ -340,6 +340,12 @@ public sealed class ScreenRecorder
         // draw_mouse=1 captures the cursor; =0 hides it.
         sb.Append(" -draw_mouse ").Append(profile.CaptureCursor ? '1' : '0');
 
+        // Buffer the capture input. The audio inputs already carry a queue, so without one here the
+        // single gdigrab reader thread can stall; its pacing loop then jumps to catch up, which shows
+        // up as a periodic micro-stutter. -rtbufsize gives slack to ride out a brief encoder/disk
+        // spike instead of dropping a burst of (large) raw frames.
+        sb.Append(" -thread_queue_size 1024 -rtbufsize 256M");
+
         switch (profile.Source)
         {
             case CaptureSource.Region:
@@ -516,6 +522,12 @@ public sealed class ScreenRecorder
         // Keyframe roughly every 2 seconds for seekability.
         var fps = profile.Fps > 0 ? profile.Fps : 60;
         sb.Append(" -g ").Append((fps * 2).ToString(CultureInfo.InvariantCulture));
+
+        // Force constant frame rate. gdigrab stamps each frame with raw wall-clock time, so without
+        // CFR the jittery, unevenly spaced timestamps reach the muxer verbatim and play back as
+        // micro-stutter. -fps_mode cfr resamples to an exact 1/fps cadence; the matching -r pins the
+        // target to the capture rate rather than gdigrab's NTSC default.
+        sb.Append(" -fps_mode cfr -r ").Append(fps.ToString(CultureInfo.InvariantCulture));
 
         // ----- Audio handling / mapping -----
         if (audioInputs == 0)
