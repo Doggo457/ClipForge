@@ -77,9 +77,9 @@ public sealed class ScreenRecorder
 
         // Pick the capture backend: GPU Desktop Duplication when it can actually capture right now,
         // otherwise the gdigrab compatibility path (so an exclusive-fullscreen game records normally
-        // instead of producing a black screen). Done synchronously (the probe is ~0.2s) so the
-        // "already recording" check and the _process assignment below stay atomic on the caller's
-        // thread and a second start can't slip in.
+        // instead of producing a black screen). Done synchronously (the probe is ~0.2s typically,
+        // ~2.4s worst case) so the "already recording" check and the _process assignment below stay
+        // atomic on the caller's thread and a second start can't slip in.
         bool useDda = CanUseDesktopDuplication(profile)
                       && CaptureProbe.IsDesktopDuplicationWorking(_ffmpegPath);
         LastCaptureUsedDesktopDuplication = useDda;

@@ -15,7 +15,8 @@ internal static class CaptureProbe
     /// Runs a tiny two-frame ddagrab capture and reports whether it succeeded. Exit code 0 means
     /// Desktop Duplication is available for the primary output at this instant; any non-zero exit
     /// (or a hang) means it isn't (game in exclusive fullscreen, no DDA support, protected output).
-    /// Takes roughly 0.2s.
+    /// Typically ~0.2s (a real block exits fast); bounded to ~2.4s worst case if the GPU is wedged
+    /// and both attempts have to hit the timeout.
     /// </summary>
     public static bool IsDesktopDuplicationWorking(string ffmpegPath)
     {
@@ -54,12 +55,20 @@ internal static class CaptureProbe
             p.BeginErrorReadLine();        // drain pipes so the child can't block
             p.BeginOutputReadLine();
 
-            if (!p.WaitForExit(2500))
+            // 1200ms per attempt keeps the worst case (~2.4s over two attempts) tolerable if ddagrab
+            // ever wedges; a normal block exits in well under this.
+            if (!p.WaitForExit(1200))
             {
-                try { p.Kill(entireProcessTree: true); } catch { }
+                try
+                {
+                    p.Kill(entireProcessTree: true);
+                    p.WaitForExit(1000); // Kill is async — reap the child before disposing
+                }
+                catch { }
                 return false;
             }
 
+            p.WaitForExit(); // flush the async stdout/stderr reads before the using disposes p
             return p.ExitCode == 0;
         }
         catch
