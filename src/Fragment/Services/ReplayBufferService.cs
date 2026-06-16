@@ -426,7 +426,17 @@ public sealed class ReplayBufferService
     {
         var fps = profile.Fps > 0 ? profile.Fps : 60;
 
+        // ddagrab (Desktop Duplication) GPU capture for full-screen/region can hit the monitor's true
+        // refresh rate; gdigrab (CPU BitBlt) caps near 60fps. Window/monitor-by-index stay on gdigrab.
+        bool usesDda = profile.Source is CaptureSource.FullScreen or CaptureSource.Region;
+
         // ---- Video input ----
+        if (usesDda)
+        {
+            AppendDdaInput(sb, profile, fps);
+        }
+        else
+        {
         sb.Append(" -f gdigrab");
         sb.Append(" -framerate ").Append(fps.ToString(CultureInfo.InvariantCulture));
         sb.Append(" -draw_mouse ").Append(profile.CaptureCursor ? '1' : '0');
@@ -495,6 +505,7 @@ public sealed class ReplayBufferService
                 sb.Append(" -i ").Append(Quote("desktop"));
                 break;
         }
+        }
 
         // ---- Audio inputs ----
         var audioInputs = AppendAudioInputs(sb, profile, loopback);
@@ -529,7 +540,25 @@ public sealed class ReplayBufferService
             sb.Append(" -force_key_frames ").Append(Quote($"expr:gte(t,n_forced*{SegmentSeconds})"));
         }
 
-        if (audioInputs == 0)
+        if (usesDda)
+        {
+            // ddagrab gives GPU (D3D11/BGRA) frames: download + convert in a filtergraph that also
+            // carries any audio mix. CFR at the capture rate keeps the rolling segments evenly paced.
+            var fc = new StringBuilder();
+            fc.Append("[0:v]hwdownload,format=bgra,format=").Append(software ? "yuv420p" : "nv12").Append("[v]");
+            if (audioInputs == 2)
+            {
+                fc.Append(";[1:a][2:a]amix=inputs=2:duration=longest:dropout_transition=2[aout]");
+            }
+            sb.Append(" -filter_complex ").Append(Quote(fc.ToString()));
+            sb.Append(" -map ").Append(Quote("[v]"));
+            if (audioInputs == 2) sb.Append(" -map ").Append(Quote("[aout]"));
+            else if (audioInputs == 1) sb.Append(" -map 1:a");
+            else sb.Append(" -an");
+
+            sb.Append(" -fps_mode cfr -r ").Append(fps.ToString(CultureInfo.InvariantCulture));
+        }
+        else if (audioInputs == 0)
         {
             sb.Append(" -an");
         }
@@ -545,7 +574,10 @@ public sealed class ReplayBufferService
             {
                 sb.Append(" -map 0:v -map 1:a");
             }
+        }
 
+        if (audioInputs > 0)
+        {
             sb.Append(" -c:a aac");
             if (profile.AudioBitrateKbps > 0)
             {
@@ -695,6 +727,31 @@ public sealed class ReplayBufferService
         {
             // Ignore cleanup failures.
         }
+    }
+
+    /// <summary>
+    /// Appends a Desktop Duplication (ddagrab) GPU capture source for full-screen (primary output)
+    /// or a sub-region of it. The encoder side adds the hwdownload + pixel-format conversion + CFR.
+    /// </summary>
+    private static void AppendDdaInput(StringBuilder sb, RecordingProfile profile, int fps)
+    {
+        var dda = new StringBuilder("ddagrab=output_idx=0");
+        dda.Append(":framerate=").Append(fps.ToString(CultureInfo.InvariantCulture));
+        dda.Append(":draw_mouse=").Append(profile.CaptureCursor ? '1' : '0');
+
+        if (profile.Source == CaptureSource.Region)
+        {
+            var w = NormalizeEven(profile.RegionWidth > 0 ? profile.RegionWidth : 1920);
+            var h = NormalizeEven(profile.RegionHeight > 0 ? profile.RegionHeight : 1080);
+            dda.Append(":offset_x=").Append(profile.RegionX.ToString(CultureInfo.InvariantCulture));
+            dda.Append(":offset_y=").Append(profile.RegionY.ToString(CultureInfo.InvariantCulture));
+            dda.Append(":video_size=")
+               .Append(w.ToString(CultureInfo.InvariantCulture))
+               .Append('x')
+               .Append(h.ToString(CultureInfo.InvariantCulture));
+        }
+
+        sb.Append(" -f lavfi -i ").Append(Quote(dda.ToString()));
     }
 
     private static string Quote(string value)

@@ -33,6 +33,12 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         // to hold one full clip (with a little headroom).
         _settings.ReplayBufferSeconds = _settings.ClipLengthSeconds + 10;
 
+        // When matching the display refresh, keep the shown fps in sync with it.
+        if (_settings.MatchDisplayRefreshRate)
+        {
+            _profile.Fps = NativeMethods.GetPrimaryRefreshHz();
+        }
+
         // Static enum-backed option lists (populated once).
         CaptureSources = new ObservableCollection<CaptureSource>(Enum.GetValues<CaptureSource>());
         Encoders = new ObservableCollection<VideoEncoder>(Enum.GetValues<VideoEncoder>());
@@ -167,6 +173,34 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         get => _profile.Fps;
         set { if (_profile.Fps != value) { _profile.Fps = value; OnPropertyChanged(); } }
     }
+
+    /// <summary>The primary monitor's current refresh rate (Hz), shown next to the frame-rate control.</summary>
+    public int DetectedRefreshHz { get; } = NativeMethods.GetPrimaryRefreshHz();
+
+    /// <summary>
+    /// When on, the capture frame rate follows the monitor's refresh rate. This is the recommended
+    /// default: recording below the display refresh is what makes footage look stuttery.
+    /// </summary>
+    public bool MatchDisplayRefreshRate
+    {
+        get => _settings.MatchDisplayRefreshRate;
+        set
+        {
+            if (_settings.MatchDisplayRefreshRate != value)
+            {
+                _settings.MatchDisplayRefreshRate = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(ManualFpsEnabled));
+                if (value)
+                {
+                    Fps = DetectedRefreshHz; // snap the shown/saved fps to the detected refresh
+                }
+            }
+        }
+    }
+
+    /// <summary>The manual frame-rate control is editable only when not matching the display.</summary>
+    public bool ManualFpsEnabled => !MatchDisplayRefreshRate;
 
     public VideoEncoder Encoder
     {

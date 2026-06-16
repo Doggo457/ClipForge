@@ -587,9 +587,19 @@ namespace Fragment.ViewModels
 
         private RecordingProfile ActiveProfile()
         {
-            return _settings.Profiles.FirstOrDefault(
-                       p => string.Equals(p.Name, SelectedProfileName, StringComparison.Ordinal))
-                   ?? _settings.ActiveProfile();
+            var profile = _settings.Profiles.FirstOrDefault(
+                              p => string.Equals(p.Name, SelectedProfileName, StringComparison.Ordinal))
+                          ?? _settings.ActiveProfile();
+
+            // Capture below the monitor's refresh rate is the main cause of stuttery-looking footage
+            // on high-refresh displays, so by default follow the live refresh rate (re-read here so a
+            // mid-session refresh/monitor change is picked up).
+            if (_settings.MatchDisplayRefreshRate)
+            {
+                profile.Fps = NativeMethods.GetPrimaryRefreshHz();
+            }
+
+            return profile;
         }
 
         private void ReloadProfiles()

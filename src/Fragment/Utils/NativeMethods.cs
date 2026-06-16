@@ -57,4 +57,72 @@ internal static class NativeMethods
             return (0, 0);
         }
     }
+
+    // ----- Display mode (for matching capture fps to the monitor refresh rate) -----
+    private const int ENUM_CURRENT_SETTINGS = -1;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DEVMODE
+    {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+        public ushort dmSpecVersion;
+        public ushort dmDriverVersion;
+        public ushort dmSize;
+        public ushort dmDriverExtra;
+        public uint dmFields;
+        public int dmPositionX;
+        public int dmPositionY;
+        public uint dmDisplayOrientation;
+        public uint dmDisplayFixedOutput;
+        public short dmColor;
+        public short dmDuplex;
+        public short dmYResolution;
+        public short dmTTOption;
+        public short dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+        public ushort dmLogPixels;
+        public uint dmBitsPerPel;
+        public uint dmPelsWidth;
+        public uint dmPelsHeight;
+        public uint dmDisplayFlags;
+        public uint dmDisplayFrequency;
+        public uint dmICMMethod;
+        public uint dmICMIntent;
+        public uint dmMediaType;
+        public uint dmDitherType;
+        public uint dmReserved1;
+        public uint dmReserved2;
+        public uint dmPanningWidth;
+        public uint dmPanningHeight;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool EnumDisplaySettings(string? lpszDeviceName, int iModeNum, ref DEVMODE lpDevMode);
+
+    /// <summary>
+    /// Returns the primary monitor's current refresh rate in Hz (e.g. 60, 144, 240). Falls back to
+    /// 60 if the value can't be read or looks bogus. Used to default the capture frame rate so
+    /// recordings match the display and don't judder.
+    /// </summary>
+    public static int GetPrimaryRefreshHz()
+    {
+        try
+        {
+            var dm = new DEVMODE { dmSize = (ushort)Marshal.SizeOf<DEVMODE>() };
+            if (EnumDisplaySettings(null, ENUM_CURRENT_SETTINGS, ref dm))
+            {
+                int hz = (int)dm.dmDisplayFrequency;
+                if (hz is >= 24 and <= 1000)
+                {
+                    return hz;
+                }
+            }
+        }
+        catch
+        {
+            // fall through to the safe default
+        }
+
+        return 60;
+    }
 }

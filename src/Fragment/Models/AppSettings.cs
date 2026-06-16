@@ -55,6 +55,13 @@ public class AppSettings
     public string Theme { get; set; } = "Dark";
 
     /// <summary>
+    /// When true (default), the capture frame rate follows the primary monitor's current refresh
+    /// rate instead of the profile's fixed <c>Fps</c>. Recording below the display refresh is the
+    /// main cause of stuttery-looking footage on high-refresh monitors.
+    /// </summary>
+    public bool MatchDisplayRefreshRate { get; set; } = true;
+
+    /// <summary>
     /// Returns the profile matching <see cref="ActiveProfileName"/>, falling back
     /// to the first profile, and finally to a fresh default if the list is empty.
     /// </summary>
@@ -93,5 +100,6 @@ public class AppSettings
         MinimizeToTray = other.MinimizeToTray;
         PlaySoundOnClip = other.PlaySoundOnClip;
         Theme = other.Theme;
+        MatchDisplayRefreshRate = other.MatchDisplayRefreshRate;
     }
 }

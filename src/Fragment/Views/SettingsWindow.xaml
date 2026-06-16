@@ -201,36 +201,41 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
                         <TextBlock Grid.Row="0" Grid.ColumnSpan="3" Style="{StaticResource SectionHeader}" Text="Video encoding"/>
 
                         <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource LabelText}" Text="Frame rate (fps)"/>
-                        <Slider Grid.Row="1" Grid.Column="1"
+                        <CheckBox Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,4"
+                                  IsChecked="{Binding MatchDisplayRefreshRate}"
+                                  Content="{Binding DetectedRefreshHz, StringFormat='Match my display refresh rate ({0} Hz)'}"/>
+                        <Slider Grid.Row="2" Grid.Column="1"
                                 Minimum="10" Maximum="240" TickFrequency="5"
                                 IsSnapToTickEnabled="True"
+                                IsEnabled="{Binding ManualFpsEnabled}"
                                 Value="{Binding Fps}"/>
-                        <TextBox Grid.Row="1" Grid.Column="2" Text="{Binding Fps}"/>
+                        <TextBox Grid.Row="2" Grid.Column="2" Text="{Binding Fps}" IsEnabled="{Binding ManualFpsEnabled}"/>
 
-                        <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource LabelText}" Text="Encoder"/>
-                        <ComboBox Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2"
+                        <TextBlock Grid.Row="3" Grid.Column="0" Style="{StaticResource LabelText}" Text="Encoder"/>
+                        <ComboBox Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2"
                                   ItemsSource="{Binding Encoders}"
                                   SelectedItem="{Binding Encoder}"/>
 
-                        <TextBlock Grid.Row="3" Grid.Column="0" Style="{StaticResource LabelText}" Text="Bitrate (kbps)"/>
-                        <Slider Grid.Row="3" Grid.Column="1"
+                        <TextBlock Grid.Row="4" Grid.Column="0" Style="{StaticResource LabelText}" Text="Bitrate (kbps)"/>
+                        <Slider Grid.Row="4" Grid.Column="1"
                                 Minimum="1000" Maximum="80000" TickFrequency="1000"
                                 IsSnapToTickEnabled="True"
                                 Value="{Binding VideoBitrateKbps}"/>
-                        <TextBox Grid.Row="3" Grid.Column="2" Text="{Binding VideoBitrateKbps}"/>
+                        <TextBox Grid.Row="4" Grid.Column="2" Text="{Binding VideoBitrateKbps}"/>
 
-                        <TextBlock Grid.Row="4" Grid.Column="0" Style="{StaticResource LabelText}" Text="Encode preset"/>
-                        <ComboBox Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2"
+                        <TextBlock Grid.Row="5" Grid.Column="0" Style="{StaticResource LabelText}" Text="Encode preset"/>
+                        <ComboBox Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2"
                                   ItemsSource="{Binding Presets}"
                                   SelectedItem="{Binding Preset}"/>
 
-                        <TextBlock Grid.Row="5" Grid.Column="0" Style="{StaticResource LabelText}" Text="Container"/>
-                        <ComboBox Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2"
+                        <TextBlock Grid.Row="6" Grid.Column="0" Style="{StaticResource LabelText}" Text="Container"/>
+                        <ComboBox Grid.Row="6" Grid.Column="1" Grid.ColumnSpan="2"
                                   ItemsSource="{Binding Containers}"
                                   SelectedItem="{Binding Container}"/>
                     </Grid>
