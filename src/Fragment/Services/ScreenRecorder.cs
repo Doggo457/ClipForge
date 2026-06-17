@@ -199,6 +199,14 @@ public sealed class ScreenRecorder
             return null;
         }
 
+        // Finalize the PREVIOUS (already-disposed) capture's WinRT GraphicsCaptureItem. On Windows 10 a
+        // leftover item registration from the prior start/stop cycle stops the system retiring the yellow
+        // border when the next session is closed. Run it on a BACKGROUND thread, fire-and-forget: doing
+        // GC.WaitForPendingFinalizers on the UI/STA thread can deadlock when a WinRT RCW finalizer
+        // marshals back to it, and it only needs to complete sometime during this capture (before the
+        // next stop), not before the new session starts.
+        System.Threading.Tasks.Task.Run(() => { try { GC.Collect(); GC.WaitForPendingFinalizers(); } catch { } });
+
         try
         {
             IntPtr hmon;

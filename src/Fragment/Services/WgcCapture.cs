@@ -50,7 +50,7 @@ public sealed class WgcCapture : IDisposable
     private readonly ID3D11Device _device;
     private readonly ID3D11DeviceContext _context;
     private readonly IDirect3DDevice _winrtDevice;
-    private readonly GraphicsCaptureItem _item;
+    private GraphicsCaptureItem? _item; // nulled on Dispose so its WinRT registration can be GC-released
     private readonly Direct3D11CaptureFramePool _framePool;
     private readonly GraphicsCaptureSession _session;
     private readonly object _gate = new();         // guards the triple-buffer index swaps
@@ -280,8 +280,11 @@ public sealed class WgcCapture : IDisposable
             _disposed = true;
             try { _session?.Dispose(); } catch { }   // retires the capture border
             try { _framePool?.Dispose(); } catch { }
-            // GraphicsCaptureItem (_item) isn't IDisposable — it's reclaimed by GC/ComWrappers.
             try { _winrtDevice?.Dispose(); } catch { } // release the WinRT D3D device wrapper
+            // GraphicsCaptureItem isn't IDisposable; drop our reference so its WinRT capture
+            // registration can be finalized. Leaving it referenced across a stop/start cycle is what
+            // makes Windows 10 fail to retire the yellow border on the SECOND session's close.
+            _item = null;
             try { _staging?.Dispose(); } catch { }
             try { _context?.Dispose(); } catch { }
             try { _device?.Dispose(); } catch { }

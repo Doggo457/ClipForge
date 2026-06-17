@@ -45,6 +45,10 @@ namespace Fragment.ViewModels
         private bool _resumeBufferAfterRecording;
         private bool _recordTransition; // true while a start/stop is in flight (UI-thread re-entry guard)
 
+        private readonly UpdateService _updateService = new();
+        private string? _pendingUpdatePath; // downloaded update exe awaiting install
+        private bool _updateReady;
+
         private string _statusText = "Idle";
         private bool _isRecording;
         private bool _isReplayRunning;
@@ -77,6 +81,7 @@ namespace Fragment.ViewModels
             ToggleReplayCommand = new RelayCommand(_ => ToggleReplay(), _ => _replayBuffer != null);
             OpenSettingsCommand = new RelayCommand(_ => OpenSettings());
             OpenEditorCommand = new RelayCommand(_ => OpenEditor());
+            ApplyUpdateCommand = new RelayCommand(_ => ApplyUpdate(), _ => UpdateReady);
             OpenOutputFolderCommand = new RelayCommand(_ => OpenOutputFolder());
         }
 
@@ -199,6 +204,54 @@ namespace Fragment.ViewModels
             }
 
             RefreshCanExecute();
+
+            // Check GitHub for a newer release and download it in the background (best-effort).
+            _ = CheckForUpdatesAsync();
+        }
+
+        // ---------------------------------------------------------------------
+        // Auto-update
+        // ---------------------------------------------------------------------
+
+        private async System.Threading.Tasks.Task CheckForUpdatesAsync()
+        {
+            try
+            {
+                var info = await _updateService.CheckAsync().ConfigureAwait(false);
+                if (info is null || _disposed) return;
+
+                var path = await _updateService.DownloadAsync(info).ConfigureAwait(false);
+                if (_disposed) return;
+
+                // Marshal the UI-bound writes onto the dispatcher — this runs as a background task, so
+                // the continuation isn't guaranteed to be on the UI thread.
+                Application.Current?.Dispatcher.Invoke(() =>
+                {
+                    if (_disposed) return;
+                    _pendingUpdatePath = path;
+                    UpdateButtonText = $"Update to {info.Tag}";
+                    UpdateReady = true;
+                    StatusText = $"Update {info.Tag} downloaded — click Update to install.";
+                });
+            }
+            catch
+            {
+                // Offline / API error / download failed — silently skip; we'll try again next launch.
+            }
+        }
+
+        private void ApplyUpdate()
+        {
+            if (string.IsNullOrEmpty(_pendingUpdatePath)) return;
+            StatusText = "Installing update…";
+            if (_updateService.ApplyAndRestart(_pendingUpdatePath))
+            {
+                Application.Current?.Shutdown();
+            }
+            else
+            {
+                StatusText = "Update failed to start — try downloading from GitHub.";
+            }
         }
 
         // ---------------------------------------------------------------------
@@ -308,6 +361,26 @@ namespace Fragment.ViewModels
             }
         }
 
+        /// <summary>True once a newer release has been downloaded and is ready to install.</summary>
+        public bool UpdateReady
+        {
+            get => _updateReady;
+            private set
+            {
+                if (SetField(ref _updateReady, value))
+                {
+                    (ApplyUpdateCommand as RelayCommand)?.RaiseCanExecuteChanged();
+                }
+            }
+        }
+
+        private string _updateButtonText = "Update available";
+        public string UpdateButtonText
+        {
+            get => _updateButtonText;
+            private set => SetField(ref _updateButtonText, value);
+        }
+
         public string RecordTimer
         {
             get => _recordTimer;
@@ -329,6 +402,7 @@ namespace Fragment.ViewModels
         public ICommand ToggleReplayCommand { get; }
         public ICommand OpenSettingsCommand { get; }
         public ICommand OpenEditorCommand { get; }
+        public ICommand ApplyUpdateCommand { get; }
         public ICommand OpenOutputFolderCommand { get; }
 
         // ---------------------------------------------------------------------

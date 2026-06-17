@@ -25,6 +25,8 @@
         <SolidColorBrush x:Key="DangerBrush" Color="#FFE5484D" />
         <SolidColorBrush x:Key="BorderBrush" Color="#FF34373E" />
 
+        <BooleanToVisibilityConverter x:Key="BoolToVis" />
+
         <!-- Flat dark button style. -->
         <Style x:Key="FlatButton" TargetType="Button">
             <Setter Property="Background" Value="{DynamicResource PanelBackgroundBrush}" />
@@ -221,6 +223,16 @@
                     Command="{Binding SaveClipCommand}"
                     Content="Save Clip" />
         </Grid>
+
+        <!-- Update banner (shown only once a newer release has been downloaded) -->
+        <Button Grid.Row="5"
+                VerticalAlignment="Bottom"
+                Margin="0,0,0,12"
+                Style="{StaticResource FlatButton}"
+                BorderBrush="{DynamicResource AccentBrush}"
+                Command="{Binding ApplyUpdateCommand}"
+                Content="{Binding UpdateButtonText}"
+                Visibility="{Binding UpdateReady, Converter={StaticResource BoolToVis}}" />
 
         <!-- Bottom action buttons -->
         <Grid Grid.Row="6">
