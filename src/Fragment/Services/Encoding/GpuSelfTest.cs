@@ -80,10 +80,10 @@ internal static class GpuSelfTest
         string outPath = Path.Combine(Dir, "gpu_record.mp4");
         try { File.Delete(outPath); } catch { }
 
-        using (var rec = new GpuVideoRecorder(gpu, hmon, outPath, 60, 16_000_000, captureCursor: true, diag: W))
+        using (var rec = new GpuVideoRecorder(gpu, hmon, outPath, 60, 16_000_000, captureCursor: true, systemAudio: true, diag: W))
         {
             var proc = System.Diagnostics.Process.GetCurrentProcess();
-            W($"recording 10s at {rec.Width}x{rec.Height}@60 to gpu_record.mp4 ...");
+            W($"recording 10s at {rec.Width}x{rec.Height}@60 (audio={rec.HasAudio}) to gpu_record.mp4 ...");
             rec.Start();
 
             var cpu0 = proc.TotalProcessorTime;
@@ -94,7 +94,7 @@ internal static class GpuSelfTest
 
             rec.Stop();
             int cores = Environment.ProcessorCount;
-            W($"frames emitted: {rec.FramesEmitted}, copyFalse: {rec.CopyFalseCount}, arrived: {rec.ArrivedCount}");
+            W($"frames emitted: {rec.FramesEmitted}, copyFalse: {rec.CopyFalseCount}, arrived: {rec.ArrivedCount}, audioBufs: {rec.AudioBuffers}");
             W($"CPU: {cpuMs:F0}ms over {wallMs:F0}ms = {cpuMs / wallMs * 100:F1}% of 1 core ({cpuMs / wallMs / cores * 100:F2}% of all {cores} cores)");
             if (rec.LastError != null) W("lastError: " + rec.LastError);
         }

@@ -7,14 +7,15 @@ using Vortice.Direct3D11;
 namespace Fragment.Services.Encoding;
 
 /// <summary>
-/// End-to-end GPU video recorder: WGC capture (frames kept on the GPU) → fixed-function BGRA→NV12
-/// conversion → in-process hardware H.264 encode → MP4, with no CPU touching the pixels.
+/// End-to-end GPU recorder: WGC capture (frames kept on the GPU) → fixed-function BGRA→NV12 conversion
+/// → in-process hardware H.264 encode → MP4, with optional system audio (WASAPI loopback → AAC) muxed
+/// in. No CPU touches the video pixels.
 ///
-/// A dedicated even-cadence "FrameFeeder" thread drives the pipeline: each tick it snapshots the latest
-/// captured frame (repeating the previous one if capture has stalled, which keeps motion smooth) and
-/// emits exactly one CFR frame. Pacing is decoupled from the encoder so encode/disk hiccups don't make
-/// the cadence stutter. A small ring of input/NV12 textures lets the async encoder drain without the
-/// feeder overwriting a frame still in flight.
+/// A dedicated even-cadence "FrameFeeder" thread drives the video pipeline: each tick it snapshots the
+/// latest captured frame (repeating the previous one if capture stalled, which keeps motion smooth) and
+/// emits one frame, timestamped on a shared monotonic clock. Audio buffers are timestamped on the SAME
+/// clock so the muxer interleaves them in A/V sync. A small ring of input/NV12 textures lets the async
+/// encoder drain without the feeder overwriting a frame still in flight.
 /// </summary>
 public sealed class GpuVideoRecorder : IDisposable
 {
@@ -31,6 +32,13 @@ public sealed class GpuVideoRecorder : IDisposable
     private readonly ID3D11Texture2D[] _inputPool = new ID3D11Texture2D[PoolSize];
     private readonly ID3D11Texture2D[] _nv12Pool = new ID3D11Texture2D[PoolSize];
 
+    private GpuAudioCapture? _audio;
+    private readonly int _audioRate, _audioChannels;
+    private long _audioSamples;       // per-channel samples written so far
+    private long _audioAnchor100ns;   // real-clock time of the first audio sample
+    private bool _audioAnchored;
+
+    private Stopwatch? _clock;         // shared A/V timeline (started at Start)
     private Thread? _thread;
     private volatile bool _running;
     private bool _timerRaised;
@@ -40,10 +48,13 @@ public sealed class GpuVideoRecorder : IDisposable
     public int Height => _conv.Height;
     public long FramesEmitted { get; private set; }
     public long CopyFalseCount { get; private set; }
+    public long AudioBuffers { get; private set; }
     public string? LastError { get; private set; }
     public long ArrivedCount => _cap.ArrivedCount;
+    public bool HasAudio => _audio != null;
 
-    public GpuVideoRecorder(GpuRecordingDevice gpu, IntPtr hmon, string path, int fps, int bitrate, bool captureCursor, Action<string>? diag = null)
+    public GpuVideoRecorder(GpuRecordingDevice gpu, IntPtr hmon, string path, int fps, int bitrate,
+        bool captureCursor, bool systemAudio = false, int audioBitrateBps = 160_000, Action<string>? diag = null)
     {
         _diag = diag;
         _gpu = gpu;
@@ -56,7 +67,21 @@ public sealed class GpuVideoRecorder : IDisposable
         }
 
         _conv = new VideoProcessorConverter(gpu, w, h, _fps);
-        _writer = new MfH264SinkWriter(gpu, path, _conv.Width, _conv.Height, _fps, bitrate);
+
+        if (systemAudio)
+        {
+            try
+            {
+                _audio = new GpuAudioCapture(OnAudioPcm);
+                _audioRate = _audio.SampleRate;
+                _audioChannels = _audio.Channels;
+            }
+            catch (Exception ex) { _diag?.Invoke("audio disabled: " + ex.Message); _audio = null; }
+        }
+
+        _writer = new MfH264SinkWriter(gpu, path, _conv.Width, _conv.Height, _fps, bitrate,
+            _audio != null ? _audioRate : 0, _audioChannels > 0 ? _audioChannels : 2, audioBitrateBps);
+
         for (int i = 0; i < PoolSize; i++)
         {
             _inputPool[i] = _conv.CreateInputTexture();
@@ -69,6 +94,10 @@ public sealed class GpuVideoRecorder : IDisposable
         if (_running) return;
         _running = true;
         try { timeBeginPeriod(1); _timerRaised = true; } catch { }
+
+        _clock = Stopwatch.StartNew();
+        try { _audio?.Start(); } catch (Exception ex) { _diag?.Invoke("audio start failed: " + ex.Message); }
+
         _thread = new Thread(Loop)
         {
             IsBackground = true,
@@ -80,17 +109,16 @@ public sealed class GpuVideoRecorder : IDisposable
 
     private void Loop()
     {
-        var sw = Stopwatch.StartNew();
         long freq = Stopwatch.Frequency;
         long frame = 0;
+        long frameDur = 10_000_000L / _fps;
 
         while (_running)
         {
-            // Even-cadence deadline for this frame index (no drift: derived from the absolute index).
-            // Sleep (1 ms timer resolution) without spinning — the output is CFR (timestamps come from the
-            // frame index), so ±1 ms sampling jitter is invisible, and not spinning keeps CPU near zero.
+            // Even-cadence deadline for this frame index. Sleep (1 ms timer) without spinning — keeps CPU
+            // near zero; the actual emit time is read from the shared clock so A/V stay aligned.
             long deadline = frame * freq / _fps;
-            long now = sw.ElapsedTicks;
+            long now = _clock!.ElapsedTicks;
             if (deadline > now)
             {
                 int ms = (int)((deadline - now) * 1000 / freq);
@@ -101,22 +129,19 @@ public sealed class GpuVideoRecorder : IDisposable
             var input = _inputPool[slot];
             var nv12 = _nv12Pool[slot];
 
-            bool trace = frame < 3 || frame % 60 == 0;
+            bool trace = frame < 3 || frame % 600 == 0;
             try
             {
                 // Pull + convert + encode, all on this one thread. If capture stalled, CopyLatestInto
                 // re-copies the previous frame, so we still emit on cadence (frame-repeat) → smooth motion.
-                if (trace) _diag?.Invoke($"  f{frame}: copy+convert...");
                 if (_cap.CopyLatestInto(input))
                 {
                     _conv.Convert(input, nv12);
                     _gpu.Context.Flush(); // submit the Blt so the encoder sees finished NV12
-                    long t0 = frame * 10_000_000L / _fps;
-                    long t1 = (frame + 1) * 10_000_000L / _fps;
-                    if (trace) _diag?.Invoke($"  f{frame}: write...");
-                    _writer.WriteFrame(nv12, t0, t1 - t0);
-                    if (trace) _diag?.Invoke($"  f{frame}: done (emitted={FramesEmitted + 1})");
+                    long ts = _clock!.Elapsed.Ticks; // 100-ns real time at emit (shared with audio)
+                    _writer.WriteFrame(nv12, ts, frameDur);
                     FramesEmitted++;
+                    if (trace) _diag?.Invoke($"  f{frame}: emitted={FramesEmitted} audioBufs={AudioBuffers}");
                 }
                 else { CopyFalseCount++; }
             }
@@ -131,14 +156,44 @@ public sealed class GpuVideoRecorder : IDisposable
         }
     }
 
+    // Called on NAudio's capture thread with interleaved 16-bit PCM. Timestamp on the shared clock,
+    // anchored so the first sample maps to its real capture time, then advanced by exact sample count.
+    private void OnAudioPcm(byte[] pcm, int count)
+    {
+        var clock = _clock;
+        if (clock is null || count <= 0 || _audioChannels <= 0) return;
+
+        int perChannel = count / (2 * _audioChannels);
+        if (perChannel <= 0) return;
+
+        if (!_audioAnchored)
+        {
+            long bufDur = perChannel * 10_000_000L / _audioRate;
+            _audioAnchor100ns = Math.Max(0, clock.Elapsed.Ticks - bufDur);
+            _audioSamples = 0;
+            _audioAnchored = true;
+        }
+
+        long ts = _audioAnchor100ns + _audioSamples * 10_000_000L / _audioRate;
+        long dur = perChannel * 10_000_000L / _audioRate;
+        try { _writer.WriteAudio(pcm, count, ts, dur); AudioBuffers++; }
+        catch (Exception ex) { LastError ??= "audio: " + ex.Message; }
+        _audioSamples += perChannel;
+    }
+
     public void Stop()
     {
         if (!_running && _thread is null) return;
         _running = false;
+
         _diag?.Invoke("Stop: joining feeder...");
         try { if (_thread?.Join(3000) == false) _diag?.Invoke("Stop: feeder JOIN TIMEOUT"); } catch { }
         _thread = null;
         if (_timerRaised) { try { timeEndPeriod(1); } catch { } _timerRaised = false; }
+
+        try { _audio?.Dispose(); } catch { } // stop audio capture before finalizing the file
+        _audio = null;
+
         _diag?.Invoke("Stop: finalizing writer...");
         _writer.Stop();
         _diag?.Invoke("Stop: done");
