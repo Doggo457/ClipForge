@@ -20,12 +20,14 @@ internal static class GpuSelfTest
     {
         try { Directory.CreateDirectory(Dir); } catch { }
         var log = Path.Combine(Dir, "gputest.log");
-        void W(string s) { try { File.AppendAllText(log, s + Environment.NewLine); } catch { } }
+        var logGate = new object();
+        void W(string s) { lock (logGate) { try { File.AppendAllText(log, s + Environment.NewLine); } catch { } } }
         try { File.WriteAllText(log, $"GPUTEST mode={mode} at {DateTime.Now:HH:mm:ss}{Environment.NewLine}"); } catch { }
 
         try
         {
-            if (mode == "2") RunCaptureConvert(W);
+            if (mode == "3") RunRecord(W);
+            else if (mode == "2") RunCaptureConvert(W);
             else RunDeviceOnly(W);
         }
         catch (Exception ex)
@@ -69,6 +71,38 @@ internal static class GpuSelfTest
         DumpNv12(gpu, nv12, conv.Width, conv.Height, Path.Combine(Dir, "capture_nv12.png"));
         W($"wrote capture_nv12.png ({conv.Width}x{conv.Height})");
         W("RESULT: PASS");
+    }
+
+    private static void RunRecord(Action<string> W)
+    {
+        using var gpu = new GpuRecordingDevice();
+        IntPtr hmon = WgcCapture.MonitorFromPoint(0, 0); // primary
+        string outPath = Path.Combine(Dir, "gpu_record.mp4");
+        try { File.Delete(outPath); } catch { }
+
+        using (var rec = new GpuVideoRecorder(gpu, hmon, outPath, 60, 16_000_000, captureCursor: true, diag: W))
+        {
+            var proc = System.Diagnostics.Process.GetCurrentProcess();
+            W($"recording 10s at {rec.Width}x{rec.Height}@60 to gpu_record.mp4 ...");
+            rec.Start();
+
+            var cpu0 = proc.TotalProcessorTime;
+            var wall = System.Diagnostics.Stopwatch.StartNew();
+            System.Threading.Thread.Sleep(10000);
+            double cpuMs = (proc.TotalProcessorTime - cpu0).TotalMilliseconds;
+            double wallMs = wall.Elapsed.TotalMilliseconds;
+
+            rec.Stop();
+            int cores = Environment.ProcessorCount;
+            W($"frames emitted: {rec.FramesEmitted}, copyFalse: {rec.CopyFalseCount}, arrived: {rec.ArrivedCount}");
+            W($"CPU: {cpuMs:F0}ms over {wallMs:F0}ms = {cpuMs / wallMs * 100:F1}% of 1 core ({cpuMs / wallMs / cores * 100:F2}% of all {cores} cores)");
+            if (rec.LastError != null) W("lastError: " + rec.LastError);
+        }
+        W("recorder disposed");
+
+        var fi = new FileInfo(outPath);
+        W(fi.Exists ? $"wrote gpu_record.mp4 ({fi.Length:N0} bytes)" : "RESULT: FAIL - file missing");
+        if (fi.Exists && fi.Length > 0) W("RESULT: PASS");
     }
 
     // --- read-back + PNG helpers (TEST ONLY; the real pipeline never reads back) ---

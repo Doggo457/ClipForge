@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Fragment.Services; // reuse WgcCapture's interop interfaces + MonitorFromPoint
@@ -6,7 +7,6 @@ using Vortice.Direct3D11;
 using Vortice.DXGI;
 using WinRT;
 using Windows.Foundation.Metadata;
-using Windows.Graphics;
 using Windows.Graphics.Capture;
 using Windows.Graphics.DirectX;
 using Windows.Graphics.DirectX.Direct3D11;
@@ -14,9 +14,11 @@ using Windows.Graphics.DirectX.Direct3D11;
 namespace Fragment.Services.Encoding;
 
 /// <summary>
-/// Windows.Graphics.Capture that keeps each frame ON THE GPU. Instead of the CPU staging/copy the
-/// ffmpeg path uses, FrameArrived does a GPU→GPU CopyResource of the captured BGRA surface into an
-/// app-owned "latest" texture on the shared device, so the encoder can consume it with no readback.
+/// Windows.Graphics.Capture that keeps each frame ON THE GPU. Frames are <b>pulled</b> by the caller
+/// (the FrameFeeder thread) via <see cref="CopyLatestInto"/> rather than pushed on WGC's free-threaded
+/// FrameArrived event — so every D3D context operation (capture copy, convert, encode) happens on the
+/// single feeder thread, avoiding cross-thread contention with the encoder MFT over the shared device.
+/// The captured BGRA surface is copied GPU→GPU into an app-owned "latest" texture (no readback).
 /// </summary>
 public sealed class GpuWgcCapture : IDisposable
 {
@@ -29,7 +31,6 @@ public sealed class GpuWgcCapture : IDisposable
     private GraphicsCaptureItem? _item;
     private readonly Direct3D11CaptureFramePool _framePool;
     private readonly GraphicsCaptureSession _session;
-    private readonly object _gate = new();
 
     private ID3D11Texture2D? _latest; // app-owned BGRA copy of the most recent frame (on the GPU)
     private int _w, _h;
@@ -54,7 +55,7 @@ public sealed class GpuWgcCapture : IDisposable
 
         var size = _item.Size;
         _framePool = Direct3D11CaptureFramePool.CreateFreeThreaded(
-            _winrtDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized, 2, size);
+            _winrtDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized, 3, size);
         _session = _framePool.CreateCaptureSession(_item);
 
         try
@@ -71,16 +72,16 @@ public sealed class GpuWgcCapture : IDisposable
         }
         catch { }
 
-        _framePool.FrameArrived += OnFrameArrived;
         _session.StartCapture();
     }
 
+    /// <summary>Polls the capture pool (on the calling thread) until the first frame lands.</summary>
     public bool WaitForFirstFrame(int timeoutMs, out int width, out int height)
     {
-        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var sw = Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < timeoutMs)
         {
-            lock (_gate) { if (_hasFrame) { width = _w; height = _h; return true; } }
+            if (PullLatest()) { width = _w; height = _h; return true; }
             Thread.Sleep(8);
         }
         width = height = 0;
@@ -88,60 +89,57 @@ public sealed class GpuWgcCapture : IDisposable
     }
 
     /// <summary>
-    /// Copies the latest captured frame into <paramref name="dest"/> (caller-owned BGRA texture on the
-    /// same device) under the lock — a quick GPU→GPU copy that snapshots a tear-free frame for the
-    /// converter/encoder to consume without blocking capture. Returns false before the first frame.
+    /// Refreshes from the capture pool then copies the most recent frame into <paramref name="dest"/>
+    /// (caller-owned BGRA texture on the same device). Call on the feeder thread only. If no new frame
+    /// has arrived since last time, the previous frame is re-copied (frame-repeat → smooth cadence).
+    /// Returns false before the very first frame.
     /// </summary>
     public bool CopyLatestInto(ID3D11Texture2D dest)
     {
-        lock (_gate)
-        {
-            if (!_hasFrame || _latest is null) return false;
-            _context.CopyResource(dest, _latest);
-            return true;
-        }
+        PullLatest();
+        if (!_hasFrame || _latest is null) return false;
+        _context.CopyResource(dest, _latest);
+        return true;
     }
 
-    private void OnFrameArrived(Direct3D11CaptureFramePool sender, object args)
+    /// <summary>Drains the pool to the newest queued frame and copies it into <see cref="_latest"/>.</summary>
+    private bool PullLatest()
     {
-        if (_disposed) return;
-        try
+        if (_disposed) return false;
+        Direct3D11CaptureFrame? latest = null, f;
+        while ((f = _framePool.TryGetNextFrame()) != null) { latest?.Dispose(); latest = f; }
+        if (latest is null) return false;
+
+        using (latest)
+        using (var src = GetTexture(latest.Surface))
         {
-            using var frame = sender.TryGetNextFrame();
-            if (frame is null) return;
-            using var src = GetTexture(frame.Surface);
             var desc = src.Description;
             int w = (int)desc.Width, h = (int)desc.Height;
-
-            lock (_gate)
+            if (_latest is null || _w != w || _h != h)
             {
-                if (_disposed) return;
-                if (_latest is null || _w != w || _h != h)
+                _latest?.Dispose();
+                _latest = _device.CreateTexture2D(new Texture2DDescription
                 {
-                    _latest?.Dispose();
-                    _latest = _device.CreateTexture2D(new Texture2DDescription
-                    {
-                        Width = (uint)w,
-                        Height = (uint)h,
-                        MipLevels = 1,
-                        ArraySize = 1,
-                        Format = Format.B8G8R8A8_UNorm,
-                        SampleDescription = new SampleDescription(1, 0),
-                        Usage = ResourceUsage.Default,
-                        // RenderTarget (not ShaderResource): lets this texture also serve directly as a
-                        // VideoProcessor input view if needed — a ShaderResource-only texture is rejected.
-                        BindFlags = BindFlags.RenderTarget,
-                        CPUAccessFlags = CpuAccessFlags.None,
-                        MiscFlags = ResourceOptionFlags.None,
-                    });
-                    _w = w; _h = h;
-                }
-                _context.CopyResource(_latest, src);
-                _hasFrame = true;
+                    Width = (uint)w,
+                    Height = (uint)h,
+                    MipLevels = 1,
+                    ArraySize = 1,
+                    Format = Format.B8G8R8A8_UNorm,
+                    SampleDescription = new SampleDescription(1, 0),
+                    Usage = ResourceUsage.Default,
+                    // RenderTarget (not ShaderResource): a ShaderResource-only texture is rejected as a
+                    // VideoProcessor input view by some drivers (AMD).
+                    BindFlags = BindFlags.RenderTarget,
+                    CPUAccessFlags = CpuAccessFlags.None,
+                    MiscFlags = ResourceOptionFlags.None,
+                });
+                _w = w; _h = h;
             }
-            Interlocked.Increment(ref _arrivedCount);
+            _context.CopyResource(_latest, src);
+            _hasFrame = true;
         }
-        catch { /* races during teardown */ }
+        Interlocked.Increment(ref _arrivedCount);
+        return true;
     }
 
     private ID3D11Texture2D GetTexture(IDirect3DSurface surface)
@@ -155,12 +153,11 @@ public sealed class GpuWgcCapture : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposeGuard, 1) != 0) return;
-        try { _framePool.FrameArrived -= OnFrameArrived; } catch { }
-        lock (_gate) { _disposed = true; }
+        _disposed = true;
 
         try { _session?.Dispose(); } catch { }   // retires the Win10 border
         try { _framePool?.Dispose(); } catch { }
-        lock (_gate) { try { _latest?.Dispose(); } catch { } _latest = null; }
+        try { _latest?.Dispose(); } catch { } _latest = null;
         _item = null; // release the WGC item so its registration can be GC-finalized (border-restart fix)
     }
 }
