@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Fragment.Models;
 using Vortice.Direct3D11;
 
 namespace Fragment.Services.Encoding;
@@ -54,7 +55,7 @@ public sealed class GpuVideoRecorder : IDisposable
     public bool HasAudio => _audio != null;
 
     public GpuVideoRecorder(GpuRecordingDevice gpu, IntPtr hmon, string path, int fps, int bitrate,
-        bool captureCursor, bool systemAudio = false, int audioBitrateBps = 160_000, Action<string>? diag = null)
+        bool captureCursor, AudioMode audio = AudioMode.None, int audioBitrateBps = 160_000, Action<string>? diag = null)
     {
         _diag = diag;
         _gpu = gpu;
@@ -68,13 +69,15 @@ public sealed class GpuVideoRecorder : IDisposable
 
         _conv = new VideoProcessorConverter(gpu, w, h, _fps);
 
-        if (systemAudio)
+        bool wantSystem = audio is AudioMode.SystemOnly or AudioMode.SystemAndMic;
+        bool wantMic = audio is AudioMode.MicOnly or AudioMode.SystemAndMic;
+        if (wantSystem || wantMic)
         {
             try
             {
-                _audio = new GpuAudioCapture(OnAudioPcm);
-                _audioRate = _audio.SampleRate;
-                _audioChannels = _audio.Channels;
+                var a = new GpuAudioCapture(wantSystem, wantMic, OnAudioPcm);
+                if (a.Active) { _audio = a; _audioRate = a.SampleRate; _audioChannels = a.Channels; }
+                else { a.Dispose(); }
             }
             catch (Exception ex) { _diag?.Invoke("audio disabled: " + ex.Message); _audio = null; }
         }

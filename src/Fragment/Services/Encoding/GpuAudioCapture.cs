@@ -1,104 +1,159 @@
 using System;
-using System.Runtime.InteropServices;
+using System.Diagnostics;
+using System.Threading;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
 
 namespace Fragment.Services.Encoding;
 
 /// <summary>
-/// Captures system (desktop) audio via WASAPI loopback and delivers it as interleaved 16-bit PCM —
-/// the format the Media Foundation AAC encoder wants — to a callback. A silent keep-alive render
-/// stream keeps the endpoint active so loopback keeps delivering even when nothing is playing
-/// (otherwise WASAPI loopback stalls during silence and the audio drifts out of sync).
+/// Captures system (WASAPI loopback) and/or microphone audio, mixes them to a fixed 48 kHz stereo
+/// stream, and delivers interleaved 16-bit PCM (the format the MF AAC encoder wants) to a callback.
+///
+/// Each source feeds a thread-safe buffer (resampled / up-mixed to 48 kHz stereo). A steady pull thread,
+/// clocked by a Stopwatch, reads exactly <c>elapsed × 48000</c> frames so the produced audio tracks real
+/// time (no drift vs the video clock). Underruns read as silence; overruns are discarded — so a glitch
+/// in one source never desyncs the stream. A silent keep-alive render stream keeps loopback delivering
+/// during system silence.
 /// </summary>
 public sealed class GpuAudioCapture : IDisposable
 {
-    private readonly Action<byte[], int> _onPcm16; // (interleaved int16 buffer, valid byte count)
-    private WasapiLoopbackCapture? _cap;
+    private const int Rate = 48000;
+    private const int Ch = 2;
+
+    private readonly Action<byte[], int> _onPcm16;
+    private readonly bool _wantSystem, _wantMic;
+
+    private WasapiLoopbackCapture? _loopback;
+    private WasapiCapture? _mic;
     private IWavePlayer? _silence;
+    private BufferedWaveProvider? _sysBuf, _micBuf;
+    private MixingSampleProvider? _mixer;
+
+    private Thread? _pump;
+    private volatile bool _running;
+    private float[] _mixF = Array.Empty<float>();
     private byte[] _pcm = Array.Empty<byte>();
-    private bool _isFloat;
-    private int _inBytesPerSample;
-    private volatile bool _disposed;
 
-    public int SampleRate { get; }
-    public int Channels { get; }
+    public int SampleRate => Rate;
+    public int Channels => Ch;
 
-    public GpuAudioCapture(Action<byte[], int> onPcm16)
+    /// <summary>True if at least one source initialised — the recorder only adds an audio stream if so.</summary>
+    public bool Active => _loopback != null || _mic != null;
+
+    public GpuAudioCapture(bool captureSystem, bool captureMic, Action<byte[], int> onPcm16)
     {
+        _wantSystem = captureSystem;
+        _wantMic = captureMic;
         _onPcm16 = onPcm16;
-        // Construct now so the caller can read the device format before the encoder is configured.
-        _cap = new WasapiLoopbackCapture();
-        var f = _cap.WaveFormat;
-        SampleRate = f.SampleRate;
-        Channels = f.Channels;
-        _isFloat = f.Encoding == WaveFormatEncoding.IeeeFloat;
-        _inBytesPerSample = f.BitsPerSample / 8;
+
+        _mixer = new MixingSampleProvider(WaveFormat.CreateIeeeFloatWaveFormat(Rate, Ch)) { ReadFully = true };
+
+        if (_wantSystem)
+        {
+            try
+            {
+                _loopback = new WasapiLoopbackCapture();
+                _sysBuf = MakeBuffer(_loopback.WaveFormat);
+                _loopback.DataAvailable += (_, e) => _sysBuf!.AddSamples(e.Buffer, 0, e.BytesRecorded);
+                _mixer.AddMixerInput(Adapt(_sysBuf.ToSampleProvider(), _loopback.WaveFormat));
+            }
+            catch { _loopback = null; _sysBuf = null; }
+        }
+
+        if (_wantMic)
+        {
+            try
+            {
+                _mic = new WasapiCapture(); // default capture device (microphone)
+                _micBuf = MakeBuffer(_mic.WaveFormat);
+                _mic.DataAvailable += (_, e) => _micBuf!.AddSamples(e.Buffer, 0, e.BytesRecorded);
+                _mixer.AddMixerInput(Adapt(_micBuf.ToSampleProvider(), _mic.WaveFormat));
+            }
+            catch { _mic = null; _micBuf = null; }
+        }
+    }
+
+    private static BufferedWaveProvider MakeBuffer(WaveFormat fmt) => new(fmt)
+    {
+        DiscardOnBufferOverflow = true,        // drop if a source races ahead — never block / desync
+        BufferDuration = TimeSpan.FromSeconds(2),
+        ReadFully = true,                      // return silence (zeros) when the source is momentarily empty
+    };
+
+    // Bring any source to the mixer's 48 kHz stereo float format.
+    private static ISampleProvider Adapt(ISampleProvider src, WaveFormat fmt)
+    {
+        if (src.WaveFormat.Channels == 1) src = new MonoToStereoSampleProvider(src);
+        if (src.WaveFormat.SampleRate != Rate) src = new WdlResamplingSampleProvider(src, Rate);
+        return src;
     }
 
     public void Start()
     {
-        if (_cap is null) return;
-
         // Inaudible silence on the render endpoint so loopback always produces frames.
-        try
+        if (_wantSystem && _loopback != null)
         {
-            var s = new WasapiOut(AudioClientShareMode.Shared, 100);
-            s.Init(new SilenceProvider(_cap.WaveFormat));
-            s.Play();
-            _silence = s;
+            try
+            {
+                var s = new WasapiOut(AudioClientShareMode.Shared, 100);
+                s.Init(new SilenceProvider(_loopback.WaveFormat));
+                s.Play();
+                _silence = s;
+            }
+            catch { /* best effort */ }
         }
-        catch { /* best effort */ }
 
-        _cap.DataAvailable += OnData;
-        _cap.StartRecording();
+        try { _loopback?.StartRecording(); } catch { }
+        try { _mic?.StartRecording(); } catch { }
+
+        _running = true;
+        _pump = new Thread(Pump) { IsBackground = true, Name = "GpuAudioPump", Priority = ThreadPriority.AboveNormal };
+        _pump.Start();
     }
 
-    private void OnData(object? sender, WaveInEventArgs e)
+    private void Pump()
     {
-        if (_disposed || e.BytesRecorded <= 0) return;
-
-        int sampleCount = e.BytesRecorded / _inBytesPerSample; // total samples across all channels
-        int outBytes = sampleCount * 2;
-        if (_pcm.Length < outBytes) _pcm = new byte[outBytes];
-
-        var outShorts = MemoryMarshal.Cast<byte, short>(_pcm.AsSpan(0, outBytes));
-        if (_isFloat)
+        var sw = Stopwatch.StartNew();
+        long produced = 0; // frames delivered so far
+        while (_running)
         {
-            var src = MemoryMarshal.Cast<byte, float>(e.Buffer.AsSpan(0, e.BytesRecorded));
-            for (int i = 0; i < src.Length; i++)
+            Thread.Sleep(8);
+            long target = sw.Elapsed.Ticks * Rate / TimeSpan.TicksPerSecond; // frames that should exist by now
+            int need = (int)(target - produced);
+            if (need <= 0) continue;
+
+            int floats = need * Ch;
+            if (_mixF.Length < floats) _mixF = new float[floats];
+            int got = _mixer!.Read(_mixF, 0, floats); // ReadFully → always returns 'floats'
+            if (got <= 0) continue;
+
+            int outBytes = got * 2;
+            if (_pcm.Length < outBytes) _pcm = new byte[outBytes];
+            var outS = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, short>(_pcm.AsSpan(0, outBytes));
+            for (int i = 0; i < got; i++)
             {
-                float v = src[i];
+                float v = _mixF[i];
                 v = v < -1f ? -1f : (v > 1f ? 1f : v);
-                outShorts[i] = (short)(v * 32767f);
+                outS[i] = (short)(v * 32767f);
             }
+            _onPcm16(_pcm, outBytes);
+            produced += got / Ch;
         }
-        else if (_inBytesPerSample == 2)
-        {
-            Buffer.BlockCopy(e.Buffer, 0, _pcm, 0, outBytes);
-        }
-        else // 24/32-bit integer PCM → take the high 16 bits
-        {
-            for (int i = 0; i < sampleCount; i++)
-            {
-                int off = i * _inBytesPerSample;
-                short hi = (short)(e.Buffer[off + _inBytesPerSample - 2] | (e.Buffer[off + _inBytesPerSample - 1] << 8));
-                outShorts[i] = hi;
-            }
-        }
-
-        _onPcm16(_pcm, outBytes);
     }
 
     public void Dispose()
     {
-        _disposed = true;
-        try { if (_cap != null) _cap.DataAvailable -= OnData; } catch { }
-        try { _cap?.StopRecording(); } catch { }
-        try { _cap?.Dispose(); } catch { }
+        _running = false;
+        try { _pump?.Join(500); } catch { }
+        try { _loopback?.StopRecording(); } catch { }
+        try { _mic?.StopRecording(); } catch { }
+        try { _loopback?.Dispose(); } catch { }
+        try { _mic?.Dispose(); } catch { }
         try { _silence?.Stop(); } catch { }
         try { _silence?.Dispose(); } catch { }
-        _cap = null;
-        _silence = null;
+        _loopback = null; _mic = null; _silence = null;
+        _sysBuf = null; _micBuf = null; _mixer = null;
     }
 }

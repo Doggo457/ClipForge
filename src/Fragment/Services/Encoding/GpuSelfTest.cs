@@ -80,7 +80,7 @@ internal static class GpuSelfTest
         string outPath = Path.Combine(Dir, "gpu_record.mp4");
         try { File.Delete(outPath); } catch { }
 
-        using (var rec = new GpuVideoRecorder(gpu, hmon, outPath, 60, 16_000_000, captureCursor: true, systemAudio: true, diag: W))
+        using (var rec = new GpuVideoRecorder(gpu, hmon, outPath, 60, 16_000_000, captureCursor: true, audio: Fragment.Models.AudioMode.SystemOnly, diag: W))
         {
             var proc = System.Diagnostics.Process.GetCurrentProcess();
             W($"recording 10s at {rec.Width}x{rec.Height}@60 (audio={rec.HasAudio}) to gpu_record.mp4 ...");
