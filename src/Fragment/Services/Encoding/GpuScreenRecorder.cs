@@ -21,9 +21,14 @@ public sealed class GpuScreenRecorder : IScreenRecorder
     public bool IsRecording { get { lock (_gate) return _recording; } }
     public string? CurrentOutputPath { get; private set; }
 
+    /// <summary>Reason the last start attempt failed (the view-model falls back to ffmpeg instead of erroring).</summary>
+    public string? LastStartError { get; private set; }
+
     public event EventHandler? Started;
     public event EventHandler<string>? Stopped;
+#pragma warning disable CS0067 // required by IScreenRecorder; start failures fall back silently, reserved for mid-recording faults
     public event EventHandler<string>? Error;
+#pragma warning restore CS0067
 
     /// <summary>The GPU engine handles MP4 full-screen / single-monitor capture (Media Foundation muxes MP4).</summary>
     public static bool CanHandle(RecordingProfile p) =>
@@ -34,7 +39,8 @@ public sealed class GpuScreenRecorder : IScreenRecorder
     {
         if (profile is null) throw new ArgumentNullException(nameof(profile));
         if (IsRecording) throw new InvalidOperationException("A recording is already in progress.");
-        if (!CanHandle(profile)) { Error?.Invoke(this, "GPU engine supports MP4 full-screen/monitor only."); return; }
+        LastStartError = null;
+        if (!CanHandle(profile)) { LastStartError = "unsupported profile"; return; }
 
         string outputPath = ScreenRecorder.ResolveOutputPath(profile);
         int fps = profile.Fps > 0 ? profile.Fps : 60;
@@ -66,7 +72,8 @@ public sealed class GpuScreenRecorder : IScreenRecorder
         catch (Exception ex)
         {
             lock (_gate) { _recording = false; _recorder = null; _device = null; }
-            Error?.Invoke(this, "GPU recording failed to start: " + ex.Message);
+            // Don't surface an error: the caller checks IsRecording and falls back to the ffmpeg engine.
+            LastStartError = ex.Message;
         }
     }
 

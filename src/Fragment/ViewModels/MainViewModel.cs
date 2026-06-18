@@ -462,6 +462,16 @@ namespace Fragment.ViewModels
 
                     await chosen.StartAsync(profile);
 
+                    // If the GPU engine couldn't start, fall back to ffmpeg so the recording still happens
+                    // (the GPU adapter fails silently for exactly this reason).
+                    if (!chosen.IsRecording && ReferenceEquals(chosen, _gpuRecorder) && _recorder != null)
+                    {
+                        StatusText = "GPU engine unavailable — using ffmpeg…";
+                        chosen = _recorder;
+                        _activeRecorder = chosen;
+                        await chosen.StartAsync(profile);
+                    }
+
                     // StartAsync reports failure via the Error event, not an exception, so if the
                     // capture never came up, resume the buffer here rather than leaving it paused
                     // while waiting on the async callback.
