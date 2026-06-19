@@ -27,7 +27,7 @@ public sealed class MfH264EncoderMft : IDisposable
     private static readonly Guid CODECAPI_AVEncCommonRateControlMode = new("1c0608e9-370c-4710-8a58-cb6181c42423");
     private static readonly Guid CODECAPI_AVEncCommonMeanBitRate = new("f7222374-2144-4815-b550-a37f8e12ee52");
     private static readonly Guid CODECAPI_AVEncMPVGOPSize = new("95f31b26-95a4-41aa-9303-246a7fc6eef1");
-    private const uint eAVEncCommonRateControlMode_UnconstrainedVBR = 2;
+    private const uint eAVEncCommonRateControlMode_UnconstrainedVBR = 2; // mean target; matches the proven sink-writer path
 
     private const int MF_E_TRANSFORM_NEED_MORE_INPUT = unchecked((int)0xC00D6D72);
     private const int MF_E_TRANSFORM_STREAM_CHANGE = unchecked((int)0xC00D6D61);
@@ -54,17 +54,14 @@ public sealed class MfH264EncoderMft : IDisposable
         try
         {
             _mft.Attributes.Set(TransformAttributeKeys.TransformAsyncUnlock, 1u);
-            try { _mft.Attributes.Set(MF_LOW_LATENCY, 1u); } catch { }
-            try
-            {
-                _mft.Attributes.Set(CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_UnconstrainedVBR);
-                _mft.Attributes.Set(CODECAPI_AVEncCommonMeanBitRate, (uint)bitrate);
-                _mft.Attributes.Set(CODECAPI_AVEncMPVGOPSize, (uint)(fps * 2));
-            }
-            catch { }
+            // NOTE: MF_LOW_LATENCY is deliberately NOT set — on the AMD encoder it forces a high fixed
+            // bitrate that ignores rate control. Rate control is applied via ICodecAPI (SetRateControl).
 
             _mft.ProcessMessage(TMessageType.MessageSetD3DManager,
                 unchecked((UIntPtr)(ulong)gpu.DeviceManager.NativePointer.ToInt64()));
+
+            // Rate control must be set BEFORE the output type — the AMD encoder bakes it in at SetOutputType.
+            SetRateControl(bitrate, fps);
 
             using (var outType = MediaFactory.MFCreateMediaType())
             {
@@ -89,10 +86,6 @@ public sealed class MfH264EncoderMft : IDisposable
                 SetRatio(inType, MediaTypeAttributeKeys.PixelAspectRatio, 1, 1);
                 _mft.SetInputType(0, inType, 0);
             }
-
-            // Honour the requested bitrate. Setting CODECAPI on the MFT attribute store is ignored by the
-            // AMD encoder; the working path is ICodecAPI (QI'd via COM interop since Vortice lacks it).
-            SetRateControl(bitrate, fps);
 
             _outputType = _mft.GetOutputCurrentType(0);
             _events = _mft.QueryInterface<IMFMediaEventGenerator>();
@@ -155,19 +148,32 @@ public sealed class MfH264EncoderMft : IDisposable
             rcw = Marshal.GetObjectForIUnknown(_mft.NativePointer);
             if (rcw is ICodecAPI codec)
             {
-                CodecSet(codec, CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_UnconstrainedVBR);
-                CodecSet(codec, CODECAPI_AVEncCommonMeanBitRate, (uint)bitrate);
-                CodecSet(codec, CODECAPI_AVEncMPVGOPSize, (uint)fps); // 1 s GOP: tight replay-clip lengths
+                int h1 = CodecSet(codec, CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_UnconstrainedVBR);
+                int h2 = CodecSet(codec, CODECAPI_AVEncCommonMeanBitRate, (uint)bitrate);
+                int h4 = CodecSet(codec, CODECAPI_AVEncMPVGOPSize, (uint)(fps * 2)); // 2 s GOP: fewer I-frames -> smaller
+                Diag($"ICodecAPI ok: mode=0x{h1:X} mean=0x{h2:X} gop=0x{h4:X} (bitrate={bitrate})");
             }
+            else Diag("ICodecAPI: QI FAILED (encoder keeps default rate control)");
         }
-        catch { /* no ICodecAPI -> encoder keeps its default rate control */ }
+        catch (Exception ex) { Diag("ICodecAPI threw: " + ex.Message); }
         finally { if (rcw != null) { try { Marshal.ReleaseComObject(rcw); } catch { } } }
     }
 
-    private static void CodecSet(ICodecAPI codec, Guid api, uint value)
+    private static int CodecSet(ICodecAPI codec, Guid api, uint value)
     {
         object v = value; // boxed uint -> VARIANT VT_UI4
-        try { codec.SetValue(ref api, ref v); } catch { }
+        try { return codec.SetValue(ref api, ref v); } catch (Exception ex) { return ex.HResult; }
+    }
+
+    private static void Diag(string m)
+    {
+        try
+        {
+            var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "Fragment");
+            System.IO.Directory.CreateDirectory(dir);
+            System.IO.File.AppendAllText(System.IO.Path.Combine(dir, "gpu_engine.log"), $"{DateTime.Now:HH:mm:ss} ENC {m}{Environment.NewLine}");
+        }
+        catch { }
     }
 
     /// <summary>Returns an independent copy of the encoder's negotiated output type (SPS/PPS) for the save muxer.</summary>

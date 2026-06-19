@@ -59,7 +59,7 @@ public sealed class GpuScreenRecorder : IScreenRecorder
                 try
                 {
                     rec = new GpuVideoRecorder(dev, hmon, outputPath, fps, videoBps,
-                        profile.CaptureCursor, profile.Audio, audioBps);
+                        profile.CaptureCursor, profile.Audio, audioBps, MicProcFor(profile), profile.MicDevice);
                 }
                 catch { dev.Dispose(); throw; }
 
@@ -96,6 +96,10 @@ public sealed class GpuScreenRecorder : IScreenRecorder
         CurrentOutputPath = null;
         Stopped?.Invoke(this, path ?? string.Empty);
     }
+
+    internal static MicProcessing MicProcFor(RecordingProfile p) => new(
+        p.MicNoiseGateEnabled, p.MicNoiseGateThresholdDb,
+        p.MicNoiseSuppressionEnabled, p.MicNoiseSuppressionStrength / 100f);
 
     private static IntPtr ResolveMonitor(RecordingProfile p)
     {

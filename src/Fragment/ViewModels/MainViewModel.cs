@@ -353,6 +353,9 @@ namespace Fragment.ViewModels
             private set => SetField(ref _statusText, value);
         }
 
+        /// <summary>Live value of the minimize-to-tray preference (read by MainWindow on close).</summary>
+        public bool MinimizeToTray => _settings.MinimizeToTray;
+
         public bool IsRecording
         {
             get => _isRecording;
@@ -533,6 +536,8 @@ namespace Fragment.ViewModels
 
                 if (saved != null)
                 {
+                    if (_settings.PlaySoundOnClip)
+                        try { System.Media.SystemSounds.Asterisk.Play(); } catch { }
                     NotificationService.ShowClipSaved(saved);
                 }
             }

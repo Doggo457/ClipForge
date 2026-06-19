@@ -65,6 +65,20 @@ public class RecordingProfile
     /// <summary>Target audio bitrate in kilobits per second.</summary>
     public int AudioBitrateKbps { get; set; } = 160;
 
+    // ---- Microphone cleanup (GPU engine) ---------------------------------
+
+    /// <summary>Gate the mic: fade out audio below the threshold (removes room noise between speech).</summary>
+    public bool MicNoiseGateEnabled { get; set; } = false;
+
+    /// <summary>Noise-gate open threshold in dBFS (e.g. -40). Quieter than this is gated out.</summary>
+    public int MicNoiseGateThresholdDb { get; set; } = -40;
+
+    /// <summary>Spectral noise suppression: reduce steady background noise (hiss/fans/hum) while speaking.</summary>
+    public bool MicNoiseSuppressionEnabled { get; set; } = false;
+
+    /// <summary>Noise suppression strength, 0–100 (higher = more aggressive).</summary>
+    public int MicNoiseSuppressionStrength { get; set; } = 60;
+
     // ---- Output destination ----------------------------------------------
 
     /// <summary>Folder recordings are written to. Defaults to Videos\Fragment.</summary>

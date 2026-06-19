@@ -7,6 +7,9 @@
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <WindowsSdkPackageVersion>10.0.22621.38</WindowsSdkPackageVersion>
     <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms> <!-- NotifyIcon for minimize-to-tray -->
+    <!-- WPF owns DPI via app.manifest; silence the WinForms-added DPI advisory. -->
+    <NoWarn>$(NoWarn);WFAC010</NoWarn>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -19,6 +22,14 @@
     <Company>Fragment</Company>
     <Product>Fragment</Product>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- WinForms is referenced only for NotifyIcon (minimize-to-tray). Drop its implicit global usings
+         so System.Windows.Forms / System.Drawing types don't collide with WPF (Application, Brush, etc.);
+         MainWindow fully-qualifies the few WinForms types it uses. -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="System.Text.Json" Version="8.0.5" />

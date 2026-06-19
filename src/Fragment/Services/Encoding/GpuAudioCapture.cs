@@ -42,7 +42,8 @@ public sealed class GpuAudioCapture : IDisposable
     /// <summary>True if at least one source initialised — the recorder only adds an audio stream if so.</summary>
     public bool Active => _loopback != null || _mic != null;
 
-    public GpuAudioCapture(bool captureSystem, bool captureMic, Action<byte[], int> onPcm16)
+    public GpuAudioCapture(bool captureSystem, bool captureMic, Action<byte[], int> onPcm16,
+        MicProcessing micProc = default, string? micDeviceName = null)
     {
         _wantSystem = captureSystem;
         _wantMic = captureMic;
@@ -66,13 +67,45 @@ public sealed class GpuAudioCapture : IDisposable
         {
             try
             {
-                _mic = new WasapiCapture(); // default capture device (microphone)
+                var dev = ResolveMic(micDeviceName);
+                try { _mic = dev != null ? new WasapiCapture(dev) : new WasapiCapture(); }
+                catch { _mic = new WasapiCapture(); } // selected device unavailable -> default mic
                 _micBuf = MakeBuffer(_mic.WaveFormat);
                 _mic.DataAvailable += (_, e) => _micBuf!.AddSamples(e.Buffer, 0, e.BytesRecorded);
-                _mixer.AddMixerInput(Adapt(_micBuf.ToSampleProvider(), _mic.WaveFormat));
+
+                // Mic cleanup chain: mono-ize -> spectral noise suppression -> noise gate -> 48k stereo.
+                ISampleProvider micSp = _micBuf.ToSampleProvider();
+                if (micSp.WaveFormat.Channels == 2) micSp = new StereoToMonoSampleProvider(micSp);
+                if (micProc.SuppressEnabled && micSp.WaveFormat.Channels == 1)
+                    micSp = new SpectralNoiseSuppressor(micSp, micProc.SuppressStrength);
+                if (micProc.GateEnabled)
+                    micSp = new NoiseGateSampleProvider(micSp, micProc.GateThresholdDb);
+                _mixer.AddMixerInput(Adapt(micSp, micSp.WaveFormat));
             }
             catch { _mic = null; _micBuf = null; }
         }
+    }
+
+    // Best-effort map of a (DirectShow) mic name to a WASAPI capture device by friendly name.
+    private static MMDevice? ResolveMic(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        try
+        {
+            var en = new MMDeviceEnumerator();
+            MMDevice? best = null;
+            foreach (var d in en.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active))
+            {
+                var fn = d.FriendlyName;
+                if (string.Equals(fn, name, StringComparison.OrdinalIgnoreCase)) return d;
+                if (best == null &&
+                    (fn.Contains(name, StringComparison.OrdinalIgnoreCase) ||
+                     name.Contains(fn, StringComparison.OrdinalIgnoreCase)))
+                    best = d;
+            }
+            return best;
+        }
+        catch { return null; }
     }
 
     private static BufferedWaveProvider MakeBuffer(WaveFormat fmt) => new(fmt)

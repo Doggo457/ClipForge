@@ -101,7 +101,7 @@ public sealed class GpuReplayBuffer : IReplayBuffer, IDisposable
                 GpuAudioCapture? audio = null;
                 if (wantSystem || wantMic)
                 {
-                    try { var a = new GpuAudioCapture(wantSystem, wantMic, OnAudioPcm); if (a.Active) audio = a; else a.Dispose(); }
+                    try { var a = new GpuAudioCapture(wantSystem, wantMic, OnAudioPcm, GpuScreenRecorder.MicProcFor(profile), profile.MicDevice); if (a.Active) audio = a; else a.Dispose(); }
                     catch { audio = null; }
                 }
                 _wantAudio = audio != null;

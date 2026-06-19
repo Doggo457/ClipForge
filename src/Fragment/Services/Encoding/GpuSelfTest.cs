@@ -26,7 +26,8 @@ internal static class GpuSelfTest
 
         try
         {
-            if (mode == "5") RunReplayBuffer(W);
+            if (mode == "6") RunMicDsp(W);
+            else if (mode == "5") RunReplayBuffer(W);
             else if (mode == "4") RunEncoderMft(W);
             else if (mode == "3") RunRecord(W);
             else if (mode == "2") RunCaptureConvert(W);
@@ -105,6 +106,45 @@ internal static class GpuSelfTest
         var fi = new FileInfo(outPath);
         W(fi.Exists ? $"wrote gpu_record.mp4 ({fi.Length:N0} bytes)" : "RESULT: FAIL - file missing");
         if (fi.Exists && fi.Length > 0) W("RESULT: PASS");
+    }
+
+    // Mic DSP correctness: gate passes loud audio / blocks silence; suppressor stays finite + right length.
+    private sealed class TestTone : NAudio.Wave.ISampleProvider
+    {
+        private readonly float _amp, _freq; private int _pos; private readonly int _len;
+        public TestTone(float amp, float freq, int lenSamples) { _amp = amp; _freq = freq; _len = lenSamples; }
+        public NAudio.Wave.WaveFormat WaveFormat { get; } = NAudio.Wave.WaveFormat.CreateIeeeFloatWaveFormat(48000, 1);
+        public int Read(float[] b, int off, int count)
+        {
+            int n = Math.Min(count, _len - _pos);
+            for (int i = 0; i < n; i++) { b[off + i] = _amp * (float)Math.Sin(2 * Math.PI * _freq * _pos / 48000.0); _pos++; }
+            return n;
+        }
+    }
+
+    private static (double rms, long n, bool finite) Drain(NAudio.Wave.ISampleProvider p)
+    {
+        var buf = new float[4096]; double sq = 0; long n = 0; bool finite = true; int r;
+        while ((r = p.Read(buf, 0, buf.Length)) > 0)
+            for (int i = 0; i < r; i++) { float v = buf[i]; if (!float.IsFinite(v)) finite = false; sq += v * v; n++; }
+        return (Math.Sqrt(sq / Math.Max(1, n)), n, finite);
+    }
+
+    private static void RunMicDsp(Action<string> W)
+    {
+        int len = 48000; // 1 s
+        var gLoud = Drain(new NoiseGateSampleProvider(new TestTone(0.5f, 440, len), -40f));
+        var gQuiet = Drain(new NoiseGateSampleProvider(new TestTone(0.0008f, 440, len), -40f)); // ~ -62 dBFS -> gated
+        var sup = Drain(new SpectralNoiseSuppressor(new TestTone(0.5f, 440, len), 0.6f));
+
+        W($"gate(loud  0.5): outRMS={gLoud.rms:F4} n={gLoud.n} finite={gLoud.finite}  (expect ~0.35, pass-through)");
+        W($"gate(quiet -62dB): outRMS={gQuiet.rms:F5} n={gQuiet.n}  (expect ~0, gated)");
+        W($"suppress(0.6): outRMS={sup.rms:F4} n={sup.n} finite={sup.finite}  (finite + ~len samples)");
+
+        bool ok = gLoud.finite && gLoud.rms > 0.2 &&         // loud tone passes the gate
+                  gQuiet.rms < 0.02 &&                        // quiet gated out
+                  sup.finite && sup.n > len - 2048;           // suppressor stable + ~full length
+        W(ok ? "RESULT: PASS" : "RESULT: FAIL");
     }
 
     // Phase 5: always-on GPU replay buffer -> save a GOP-aligned clip.

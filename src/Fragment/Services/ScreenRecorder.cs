@@ -362,7 +362,8 @@ public sealed class ScreenRecorder : IScreenRecorder
         var fileName = template
             .Replace("{date}", now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
             .Replace("{time}", now.ToString("HH-mm-ss", CultureInfo.InvariantCulture))
-            .Replace("{name}", profile.Name ?? "Default");
+            .Replace("{name}", profile.Name ?? "Default")
+            .Replace("{profile}", profile.Name ?? "Default");
 
         fileName = SanitizeFileName(fileName);
 

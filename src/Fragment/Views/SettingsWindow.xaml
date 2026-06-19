@@ -255,6 +255,10 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
                         <TextBlock Grid.Row="0" Grid.ColumnSpan="3" Style="{StaticResource SectionHeader}" Text="Audio capture"/>
@@ -290,6 +294,35 @@
                                 IsSnapToTickEnabled="True"
                                 Value="{Binding AudioBitrateKbps}"/>
                         <TextBox Grid.Row="4" Grid.Column="2" Text="{Binding AudioBitrateKbps}"/>
+
+                        <TextBlock Grid.Row="5" Grid.ColumnSpan="3" Style="{StaticResource SectionHeader}"
+                                   Text="Microphone cleanup" Margin="0,14,0,0"/>
+
+                        <CheckBox Grid.Row="6" Grid.Column="1" Grid.ColumnSpan="2"
+                                  Content="Noise gate — mute the mic between speech"
+                                  IsChecked="{Binding MicNoiseGateEnabled}"
+                                  IsEnabled="{Binding UsesMic}"/>
+
+                        <TextBlock Grid.Row="7" Grid.Column="0" Style="{StaticResource LabelText}" Text="Gate threshold (dB)"/>
+                        <Slider Grid.Row="7" Grid.Column="1"
+                                Minimum="-70" Maximum="-20" TickFrequency="5" IsSnapToTickEnabled="True"
+                                Value="{Binding MicNoiseGateThresholdDb}"
+                                IsEnabled="{Binding UsesMic}"/>
+                        <TextBox Grid.Row="7" Grid.Column="2" Text="{Binding MicNoiseGateThresholdDb}"
+                                 IsEnabled="{Binding UsesMic}"/>
+
+                        <CheckBox Grid.Row="8" Grid.Column="1" Grid.ColumnSpan="2"
+                                  Content="Noise suppression — reduce steady background noise"
+                                  IsChecked="{Binding MicNoiseSuppressionEnabled}"
+                                  IsEnabled="{Binding UsesMic}"/>
+
+                        <TextBlock Grid.Row="9" Grid.Column="0" Style="{StaticResource LabelText}" Text="Suppression strength"/>
+                        <Slider Grid.Row="9" Grid.Column="1"
+                                Minimum="0" Maximum="100" TickFrequency="10" IsSnapToTickEnabled="True"
+                                Value="{Binding MicNoiseSuppressionStrength}"
+                                IsEnabled="{Binding UsesMic}"/>
+                        <TextBox Grid.Row="9" Grid.Column="2" Text="{Binding MicNoiseSuppressionStrength}"
+                                 IsEnabled="{Binding UsesMic}"/>
                     </Grid>
                 </ScrollViewer>
             </TabItem>

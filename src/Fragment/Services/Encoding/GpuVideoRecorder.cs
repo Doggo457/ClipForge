@@ -55,7 +55,8 @@ public sealed class GpuVideoRecorder : IDisposable
     public bool HasAudio => _audio != null;
 
     public GpuVideoRecorder(GpuRecordingDevice gpu, IntPtr hmon, string path, int fps, int bitrate,
-        bool captureCursor, AudioMode audio = AudioMode.None, int audioBitrateBps = 160_000, Action<string>? diag = null)
+        bool captureCursor, AudioMode audio = AudioMode.None, int audioBitrateBps = 160_000,
+        MicProcessing micProc = default, string? micDevice = null, Action<string>? diag = null)
     {
         _diag = diag;
         _gpu = gpu;
@@ -75,7 +76,7 @@ public sealed class GpuVideoRecorder : IDisposable
         {
             try
             {
-                var a = new GpuAudioCapture(wantSystem, wantMic, OnAudioPcm);
+                var a = new GpuAudioCapture(wantSystem, wantMic, OnAudioPcm, micProc, micDevice);
                 if (a.Active) { _audio = a; _audioRate = a.SampleRate; _audioChannels = a.Channels; }
                 else { a.Dispose(); }
             }

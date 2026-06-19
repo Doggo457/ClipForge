@@ -223,6 +223,31 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         set { if (_profile.AudioBitrateKbps != value) { _profile.AudioBitrateKbps = value; OnPropertyChanged(); OnPropertyChanged(nameof(EstimatedClipSize)); } }
     }
 
+    // ---- Mic cleanup (GPU engine) ----
+    public bool MicNoiseGateEnabled
+    {
+        get => _profile.MicNoiseGateEnabled;
+        set { if (_profile.MicNoiseGateEnabled != value) { _profile.MicNoiseGateEnabled = value; OnPropertyChanged(); } }
+    }
+
+    public int MicNoiseGateThresholdDb
+    {
+        get => _profile.MicNoiseGateThresholdDb;
+        set { if (_profile.MicNoiseGateThresholdDb != value) { _profile.MicNoiseGateThresholdDb = value; OnPropertyChanged(); } }
+    }
+
+    public bool MicNoiseSuppressionEnabled
+    {
+        get => _profile.MicNoiseSuppressionEnabled;
+        set { if (_profile.MicNoiseSuppressionEnabled != value) { _profile.MicNoiseSuppressionEnabled = value; OnPropertyChanged(); } }
+    }
+
+    public int MicNoiseSuppressionStrength
+    {
+        get => _profile.MicNoiseSuppressionStrength;
+        set { if (_profile.MicNoiseSuppressionStrength != value) { _profile.MicNoiseSuppressionStrength = value; OnPropertyChanged(); } }
+    }
+
     // ===================================================================
     // Clipping tab
     // ===================================================================
