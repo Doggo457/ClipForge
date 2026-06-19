@@ -24,25 +24,31 @@
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVis" />
 
-        <!-- Caption (window control) buttons -->
+        <!-- Caption (window control) buttons. Use Segoe MDL2 glyphs (reliable, crisp) rather than a
+             TemplateBinding'd Path geometry, which doesn't run the string->Geometry converter. -->
         <Style x:Key="CaptionButton" TargetType="Button">
-            <Setter Property="Width" Value="40" />
-            <Setter Property="Height" Value="30" />
+            <Setter Property="Width" Value="44" />
+            <Setter Property="Height" Value="32" />
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="Foreground" Value="{DynamicResource SubtleForegroundBrush}" />
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets" />
+            <Setter Property="FontSize" Value="10" />
             <Setter Property="Cursor" Value="Hand" />
             <Setter Property="shell:WindowChrome.IsHitTestVisibleInChrome" Value="True" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
                         <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="7">
-                            <Path x:Name="g" Data="{TemplateBinding Tag}" Stroke="{TemplateBinding Foreground}" StrokeThickness="1.3"
-                                  HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            <TextBlock Text="{TemplateBinding Content}"
+                                       FontFamily="{TemplateBinding FontFamily}"
+                                       FontSize="{TemplateBinding FontSize}"
+                                       Foreground="{TemplateBinding Foreground}"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="b" Property="Background" Value="{DynamicResource ControlBackgroundHoverBrush}" />
-                                <Setter TargetName="g" Property="Stroke" Value="{DynamicResource ForegroundBrush}" />
+                                <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -50,11 +56,25 @@
             </Setter>
         </Style>
         <Style x:Key="CloseButton" TargetType="Button" BasedOn="{StaticResource CaptionButton}">
-            <Style.Triggers>
-                <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Foreground" Value="#FFFFFFFF" />
-                </Trigger>
-            </Style.Triggers>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="7">
+                            <TextBlock Text="{TemplateBinding Content}"
+                                       FontFamily="{TemplateBinding FontFamily}"
+                                       FontSize="{TemplateBinding FontSize}"
+                                       Foreground="{TemplateBinding Foreground}"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="b" Property="Background" Value="#E81123" />
+                                <Setter Property="Foreground" Value="#FFFFFFFF" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
 
         <!-- Hero record button: glowing gradient circle, red while recording -->
@@ -122,8 +142,8 @@
               <TextBlock Text="Fragment" FontWeight="SemiBold" FontSize="13" Margin="9,0,0,0" VerticalAlignment="Center" />
           </StackPanel>
           <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-              <Button Style="{StaticResource CaptionButton}" Click="MinimizeClick" Tag="M0,6 L11,6" />
-              <Button Style="{StaticResource CloseButton}" Click="CloseClick" Tag="M0,0 L10,10 M10,0 L0,10" />
+              <Button Style="{StaticResource CaptionButton}" Click="MinimizeClick" Content="&#xE921;" ToolTip="Minimize" />
+              <Button Style="{StaticResource CloseButton}" Click="CloseClick" Content="&#xE8BB;" ToolTip="Close" />
           </StackPanel>
       </Grid>
 
@@ -139,9 +159,46 @@
             <RowDefinition Height="Auto" />   <!-- Actions -->
         </Grid.RowDefinitions>
 
-        <!-- Record hero -->
+        <!-- Record hero. The outer ring lights up to show state: cyan glow when the replay buffer is
+             armed, pulsing red while recording, otherwise a subtle outline. -->
         <Grid Grid.Row="1" Height="168">
-            <Ellipse Width="158" Height="158" Stroke="{DynamicResource BorderStrongBrush}" StrokeThickness="1" Opacity="0.5" />
+            <Ellipse x:Name="HeroRing" Width="158" Height="158" StrokeThickness="1.5"
+                     Stroke="{DynamicResource BorderStrongBrush}" Opacity="0.5"
+                     RenderTransformOrigin="0.5,0.5">
+                <Ellipse.RenderTransform>
+                    <ScaleTransform ScaleX="1" ScaleY="1" />
+                </Ellipse.RenderTransform>
+                <Ellipse.Style>
+                    <Style TargetType="Ellipse">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsReplayRunning}" Value="True">
+                                <Setter Property="Stroke" Value="{DynamicResource AccentBrush}" />
+                                <Setter Property="Opacity" Value="0.85" />
+                                <Setter Property="Effect" Value="{DynamicResource AccentGlow}" />
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding IsRecording}" Value="True">
+                                <Setter Property="Stroke" Value="{DynamicResource DangerBrush}" />
+                                <Setter Property="Effect" Value="{DynamicResource DangerGlow}" />
+                                <DataTrigger.EnterActions>
+                                    <BeginStoryboard x:Name="RingPulse">
+                                        <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                                            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                             From="0.9" To="0.4" Duration="0:0:1.1" />
+                                            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                                             From="1" To="1.05" Duration="0:0:1.1" />
+                                            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                                             From="1" To="1.05" Duration="0:0:1.1" />
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </DataTrigger.EnterActions>
+                                <DataTrigger.ExitActions>
+                                    <StopStoryboard BeginStoryboardName="RingPulse" />
+                                </DataTrigger.ExitActions>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Ellipse.Style>
+            </Ellipse>
             <Button Style="{StaticResource RecordButton}"
                     Command="{Binding StartStopCommand}"
                     Content="{Binding RecordButtonText}"

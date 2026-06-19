@@ -174,10 +174,14 @@ public sealed class SpectralNoiseSuppressor : ISampleProvider
         for (int i = 0; i < N; i++) { _re[i] = _frame[i] * _win[i]; _im[i] = 0f; }
         Fft(_re, _im, false);
 
-        // Snapshot the live params once per frame so the whole frame uses a consistent (floor, sensitivity) pair.
+        // Snapshot the live params once per frame so the whole frame uses a consistent set.
+        // Continuous power spectral subtraction: bins are attenuated smoothly by their SNR rather than
+        // hard-gated, with an over-subtraction factor and a spectral floor that both deepen with strength
+        // (so high strength audibly removes steady noise; low strength is gentle).
         float strength = _strength;
-        float floorGain = (float)Math.Pow(10.0, (-6.0 - 20.0 * strength) / 20.0); // -6 dB (weak) .. -26 dB (strong)
-        float sensitivity = 1.6f + 3.0f * strength;                               // higher = more aggressive
+        float floorGain = (float)Math.Pow(10.0, (-12.0 - 40.0 * strength) / 20.0); // -12 dB (weak) .. -52 dB (strong)
+        float floorPow = floorGain * floorGain;
+        float oversub = 1.5f + 4.0f * strength;                                    // spectral over-subtraction
         bool enabled = Enabled;
 
         for (int b = 0; b < Bins; b++)
@@ -186,8 +190,16 @@ public sealed class SpectralNoiseSuppressor : ISampleProvider
             if (!_noiseInit) _noise[b] = mag;
             else _noise[b] = Math.Min(mag, _noise[b] * 1.0015f); // minimum statistics: instant fall, slow rise
 
-            float g = !enabled ? 1f : (mag > _noise[b] * sensitivity ? 1f : floorGain);
-            g = _gain[b] * 0.6f + g * 0.4f; // time-smooth the mask
+            float g;
+            if (!enabled) g = 1f;
+            else
+            {
+                float noise = _noise[b];
+                float snrPow = (mag * mag) / (noise * noise + 1e-12f); // a posteriori SNR (power)
+                float sub = 1f - oversub / snrPow;                     // power spectral subtraction
+                g = sub > floorPow ? (float)Math.Sqrt(sub) : floorGain;
+            }
+            g = _gain[b] * 0.6f + g * 0.4f; // time-smooth the mask (limits musical noise)
             _gain[b] = g;
 
             _re[b] *= g; _im[b] *= g;
