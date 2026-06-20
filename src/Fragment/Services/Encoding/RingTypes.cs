@@ -3,7 +3,8 @@ namespace Fragment.Services.Encoding;
 /// <summary>One encoded H.264 access unit copied out of the encoder, held in the replay ring.</summary>
 public sealed class EncodedVideoSample
 {
-    public required byte[] Data;   // contiguous compressed bitstream (encoder's output format)
+    public required byte[] Data;   // compressed bitstream; from the encoder this is a REUSED/oversized buffer valid only during the callback — copy it synchronously to retain
+    public int Length;             // valid bytes in Data (may be < Data.Length)
     public long TimeNs;            // presentation time, 100-ns units, on the shared capture clock
     public long DurNs;
     public bool KeyFrame;          // MFSampleExtension_CleanPoint — a clip must start here

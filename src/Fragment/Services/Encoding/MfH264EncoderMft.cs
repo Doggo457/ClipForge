@@ -42,6 +42,7 @@ public sealed class MfH264EncoderMft : IDisposable
     private volatile bool _disposed;
     private int _needInput;
     private readonly ManualResetEventSlim _drainDone = new(false);
+    private byte[] _scratch = Array.Empty<byte>(); // reused output buffer (event thread only) — avoids per-frame LOH churn
 
     public long SamplesOut; // diagnostics
     public long KeyFramesOut;
@@ -265,15 +266,18 @@ public sealed class MfH264EncoderMft : IDisposable
             {
                 using var mb = sample.ConvertToContiguousBuffer();
                 mb.Lock(out IntPtr p, out _, out int curLen);
-                var data = new byte[curLen];
-                Marshal.Copy(p, data, 0, curLen);
+                // Reuse one growable scratch buffer instead of allocating per frame. A fresh byte[] per output
+                // frame churned the LOH (keyframes are >85 KB) and fragmented committed memory over hours. The
+                // consumer copies Data synchronously inside the callback, so reusing the buffer is safe.
+                if (_scratch.Length < curLen) _scratch = new byte[curLen];
+                Marshal.Copy(p, _scratch, 0, curLen);
                 mb.Unlock();
 
                 bool key = sample.GetUInt32(SampleAttributeKeys.CleanPoint, out uint v).Success && v != 0;
                 SamplesOut++;
                 if (key) KeyFramesOut++;
                 if (!_disposed)
-                    _onOutput(new EncodedVideoSample { Data = data, TimeNs = sample.SampleTime, DurNs = sample.SampleDuration, KeyFrame = key });
+                    _onOutput(new EncodedVideoSample { Data = _scratch, Length = curLen, TimeNs = sample.SampleTime, DurNs = sample.SampleDuration, KeyFrame = key });
             }
             finally { try { sample.Dispose(); } catch { } }
         }

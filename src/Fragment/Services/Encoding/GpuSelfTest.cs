@@ -26,7 +26,9 @@ internal static class GpuSelfTest
 
         try
         {
-            if (mode == "6") RunMicDsp(W);
+            if (mode == "8") RunIsolationLeakTrace(W);
+            else if (mode == "7") RunReplayLeakTrace(W);
+            else if (mode == "6") RunMicDsp(W);
             else if (mode == "5") RunReplayBuffer(W);
             else if (mode == "4") RunEncoderMft(W);
             else if (mode == "3") RunRecord(W);
@@ -193,6 +195,124 @@ internal static class GpuSelfTest
         else W("RESULT: FAIL - no clip produced");
     }
 
+    // Isolation leak trace: run ONLY capture -> convert -> (optionally) encode in a tight 60fps loop,
+    // discarding output (no ring, no audio), logging process memory every 5s. Binary-search the leak:
+    //   FRAGMENT_GPUTEST_NOENC=1  -> capture + convert only (no encoder)   -> isolates WGC/VideoProcessor
+    //   (default)                 -> capture + convert + encode            -> adds the encoder MFT path
+    // If NOENC is flat but the default climbs, the leak is in the encoder submit/drain path, and vice versa.
+    private static void RunIsolationLeakTrace(Action<string> W)
+    {
+        int seconds = 120;
+        if (int.TryParse(Environment.GetEnvironmentVariable("FRAGMENT_GPUTEST_SECONDS"), out int s) && s > 0) seconds = s;
+        bool noEnc = Environment.GetEnvironmentVariable("FRAGMENT_GPUTEST_NOENC") == "1";
+        const int Fps = 60, Pool = 12;
+
+        using var gpu = new GpuRecordingDevice();
+        IntPtr hmon = WgcCapture.MonitorFromPoint(0, 0);
+        using var cap = new GpuWgcCapture(gpu, hmon, captureCursor: true);
+        if (!cap.WaitForFirstFrame(5000, out int w, out int h)) { W("RESULT: FAIL - no frame"); return; }
+        using var conv = new VideoProcessorConverter(gpu, w, h, Fps);
+
+        long encOut = 0;
+        MfH264EncoderMft? enc = noEnc ? null : new MfH264EncoderMft(gpu, conv.Width, conv.Height, Fps, 16_000_000,
+            _ => System.Threading.Interlocked.Increment(ref encOut));
+
+        // Optional: run system-audio capture too (isolates GpuAudioCapture as a leak source).
+        GpuAudioCapture? audio = null;
+        if (Environment.GetEnvironmentVariable("FRAGMENT_GPUTEST_AUDIO") == "1")
+        {
+            audio = new GpuAudioCapture(captureSystem: true, captureMic: false, (_, __) => { });
+            audio.Start();
+        }
+
+        var input = new ID3D11Texture2D[Pool];
+        var nv12 = new ID3D11Texture2D[Pool];
+        for (int i = 0; i < Pool; i++) { input[i] = conv.CreateInputTexture(); nv12[i] = conv.CreateNv12Texture(); }
+
+        var proc = System.Diagnostics.Process.GetCurrentProcess();
+        W($"isolation trace: {seconds}s, encoder={(noEnc ? "OFF" : "ON")} audio={(audio != null ? "ON" : "OFF")} {conv.Width}x{conv.Height}@{Fps}. columns: t frames enc | managedMB wsMB privMB gen2");
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        long freq = System.Diagnostics.Stopwatch.Frequency;
+        long frame = 0, nextLog = 5;
+        while (clock.Elapsed.TotalSeconds < seconds)
+        {
+            long deadline = frame * freq / Fps;
+            long now = clock.ElapsedTicks;
+            if (deadline > now) { int ms = (int)((deadline - now) * 1000 / freq); if (ms > 0) System.Threading.Thread.Sleep(ms); }
+
+            int slot = (int)(frame % Pool);
+            if (cap.CopyLatestInto(input[slot]))
+            {
+                conv.Convert(input[slot], nv12[slot]);
+                gpu.Context.Flush();
+                if (enc != null && enc.TryConsumeNeedInput())
+                    enc.SubmitFrame(nv12[slot], clock.Elapsed.Ticks, 10_000_000L / Fps);
+            }
+            frame++;
+
+            if (clock.Elapsed.TotalSeconds >= nextLog)
+            {
+                nextLog += 5;
+                proc.Refresh();
+                W($"t={clock.Elapsed.TotalSeconds,4:F0}s  frames={frame,6} enc={System.Threading.Interlocked.Read(ref encOut),6} | managedMB={GC.GetTotalMemory(false) / 1048576.0,6:F1} wsMB={proc.WorkingSet64 / 1048576.0,7:F1} privMB={proc.PrivateMemorySize64 / 1048576.0,7:F1} gen2={GC.CollectionCount(2)}");
+            }
+        }
+
+        for (int i = 0; i < Pool; i++) { try { input[i].Dispose(); } catch { } try { nv12[i].Dispose(); } catch { } }
+        try { enc?.Dispose(); } catch { }
+        try { audio?.Dispose(); } catch { }
+        W("RESULT: isolation trace complete");
+    }
+
+    // Leak trace: run the replay buffer for N seconds (FRAGMENT_GPUTEST_SECONDS, default 240) with a SMALL
+    // 30 s window, logging ring + process memory every 5 s. The ring should plateau by ~35 s; if working-set
+    // keeps climbing after that it's a leak, and the per-metric breakdown localises it (managed vs native).
+    private static void RunReplayLeakTrace(Action<string> W)
+    {
+        int seconds = 240;
+        if (int.TryParse(Environment.GetEnvironmentVariable("FRAGMENT_GPUTEST_SECONDS"), out int s) && s > 0) seconds = s;
+
+        var profile = new Fragment.Models.RecordingProfile
+        {
+            Source = Fragment.Models.CaptureSource.FullScreen,
+            Container = Fragment.Models.OutputContainer.Mp4,
+            Fps = 60,
+            VideoBitrateKbps = 16000,
+            AudioBitrateKbps = 160,
+            Audio = Fragment.Models.AudioMode.SystemOnly,
+            CaptureCursor = true,
+        };
+
+        using var buf = new GpuReplayBuffer { Diag = _ => { } }; // suppress per-event diag noise
+        var proc = System.Diagnostics.Process.GetCurrentProcess();
+        const int windowSec = 30;
+        W($"leak trace: {seconds}s run, {windowSec}s ring window (plateau expected ~{windowSec + 5}s). columns: t ring ringMB aud enc key arrived | managedMB wsMB privMB gen2");
+        buf.Start(profile, bufferSeconds: windowSec);
+
+        bool forceGc = Environment.GetEnvironmentVariable("FRAGMENT_GPUTEST_FORCEGC") == "1";
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed.TotalSeconds < seconds && buf.IsRunning)
+        {
+            System.Threading.Thread.Sleep(5000);
+            if (forceGc) // measure the TRUE reclaimable floor: blocking compacting gen2 + LOH compaction
+            {
+                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+                GC.WaitForPendingFinalizers();
+                GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+            }
+            proc.Refresh();
+            double manMB = GC.GetTotalMemory(false) / 1048576.0;
+            double wsMB = proc.WorkingSet64 / 1048576.0;
+            double pvMB = proc.PrivateMemorySize64 / 1048576.0;
+            W($"t={sw.Elapsed.TotalSeconds,4:F0}s  ring={buf.DiagVideoRingCount,5} ringMB={buf.DiagVideoRingBytes / 1048576.0,6:F1} aud={buf.DiagAudioRingCount,4} enc={buf.DiagEncSamples,6} key={buf.DiagEncKeyframes,4} arrived={buf.DiagArrived,6} | managedMB={manMB,6:F1} wsMB={wsMB,7:F1} privMB={pvMB,7:F1} gen2={GC.CollectionCount(2)}");
+        }
+
+        buf.Stop();
+        W("RESULT: trace complete");
+    }
+
     // Step 1+2 isolation: real capture -> NV12 -> hardware H.264 encoder MFT (direct), count samples/keyframes.
     private static void RunEncoderMft(Action<string> W)
     {
@@ -208,8 +328,8 @@ internal static class GpuSelfTest
         var firstFrames = new System.Collections.Generic.List<string>();
         using var enc = new MfH264EncoderMft(gpu, conv.Width, conv.Height, Fps, 16_000_000, s =>
         {
-            System.Threading.Interlocked.Add(ref totalBytes, s.Data.Length);
-            lock (keyTimes) { if (s.KeyFrame) keyTimes.Add(s.TimeNs); if (firstFrames.Count < 6) firstFrames.Add($"{(s.KeyFrame ? "KEY" : "   ")} t={s.TimeNs / 10000}ms {s.Data.Length}B"); }
+            System.Threading.Interlocked.Add(ref totalBytes, s.Length);
+            lock (keyTimes) { if (s.KeyFrame) keyTimes.Add(s.TimeNs); if (firstFrames.Count < 6) firstFrames.Add($"{(s.KeyFrame ? "KEY" : "   ")} t={s.TimeNs / 10000}ms {s.Length}B"); }
         });
         W($"encoder created: {conv.Width}x{conv.Height}@{Fps}");
 

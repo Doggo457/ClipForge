@@ -27,8 +27,64 @@ public sealed class GpuReplayBuffer : IReplayBuffer, IDisposable
 
     private readonly object _ringLock = new();
     private readonly object _lifecycle = new();
-    private readonly List<EncodedVideoSample> _videoRing = new();
-    private readonly List<AudioPcmChunk> _audioRing = new();
+
+    // The ring keeps only lightweight metadata; the encoded bytes live in a fixed, pre-allocated circular
+    // arena — ONE stable allocation with zero per-frame churn. Allocating + retaining a byte[] per frame
+    // (the previous design) promoted thousands of variable-sized arrays into gen2/LOH and fragmented
+    // committed memory, so the working set crept up over time even though live managed bytes stayed flat.
+    private readonly List<VideoEntry> _videoRing = new();
+    private readonly List<AudioEntry> _audioRing = new();
+    private ByteArena? _videoArena, _audioArena;
+    private long _videoWritePos, _audioWritePos;
+
+    private readonly struct VideoEntry
+    {
+        public VideoEntry(long off, int len, long t, long d, bool key) { Offset = off; Length = len; TimeNs = t; DurNs = d; KeyFrame = key; }
+        public readonly long Offset; public readonly int Length; public readonly long TimeNs, DurNs; public readonly bool KeyFrame;
+    }
+    private readonly struct AudioEntry
+    {
+        public AudioEntry(long off, int count, long t, long d) { Offset = off; Count = count; TimeNs = t; DurNs = d; }
+        public readonly long Offset; public readonly int Count; public readonly long TimeNs, DurNs;
+    }
+
+    // Fixed circular byte buffer in NATIVE memory (not the GC heap). A multi-hundred-MB managed byte[] would
+    // be a giant LOH object that fragments the LOH and holds committed memory the background GC won't return
+    // without an (expensive) LOH compaction. Native memory keeps the managed heap tiny, so RSS stays flat with
+    // no forced GC. All access is under _ringLock (writers = feeder/audio threads; reader = save). Freed in Dispose.
+    private sealed unsafe class ByteArena : IDisposable
+    {
+        private byte* _buf;
+        private readonly long _cap;
+        public long Capacity => _cap;
+        public ByteArena(long capacity)
+        {
+            _cap = capacity;
+            _buf = (byte*)System.Runtime.InteropServices.NativeMemory.Alloc((nuint)capacity);
+        }
+        public void Write(byte[] src, int srcOff, long pos, int len)
+        {
+            if (_buf == null) return; // defensive: never touch freed memory (callers also hold _ringLock)
+            int p = (int)(pos % _cap);
+            int first = Math.Min(len, (int)(_cap - p));
+            System.Runtime.InteropServices.Marshal.Copy(src, srcOff, (IntPtr)(_buf + p), first);
+            if (first < len) System.Runtime.InteropServices.Marshal.Copy(src, srcOff + first, (IntPtr)_buf, len - first);
+        }
+        public byte[] Read(long pos, int len)
+        {
+            var d = new byte[len];
+            if (_buf == null) return d; // defensive: never touch freed memory (callers also hold _ringLock)
+            int p = (int)(pos % _cap);
+            int first = Math.Min(len, (int)(_cap - p));
+            System.Runtime.InteropServices.Marshal.Copy((IntPtr)(_buf + p), d, 0, first);
+            if (first < len) System.Runtime.InteropServices.Marshal.Copy((IntPtr)_buf, d, first, len - first);
+            return d;
+        }
+        public void Dispose()
+        {
+            if (_buf != null) { System.Runtime.InteropServices.NativeMemory.Free(_buf); _buf = null; }
+        }
+    }
 
     [DllImport("winmm.dll")] private static extern uint timeBeginPeriod(uint ms);
     [DllImport("winmm.dll")] private static extern uint timeEndPeriod(uint ms);
@@ -51,13 +107,22 @@ public sealed class GpuReplayBuffer : IReplayBuffer, IDisposable
     private long _audioSamples, _audioAnchorNs;
     private bool _audioAnchored;
 
-    private long _videoBytes;                                  // running sum of encoded bytes in the ring
-    private const long MaxRingBytes = 2L * 1024 * 1024 * 1024; // safety cap so extreme settings can't OOM
+    private long _videoBytes;                                  // live encoded bytes in the ring (== arena span)
+    private long _audioBytes;                                  // live PCM bytes in the audio ring
+    private const long MaxRingBytes = 0x7FFFFFC7L;            // == Array.MaxLength: the arena is ONE byte[], so this is its hard ceiling
     private readonly SemaphoreSlim _saveGate = new(1, 1);      // one clip-save at a time
 
     public bool IsRunning => _running;
     public event EventHandler? Stopped;
     public Action<string>? Diag;
+
+    // Leak-tracing diagnostics (read-only snapshots; used by the headless self-test).
+    internal int DiagVideoRingCount { get { lock (_ringLock) return _videoRing.Count; } }
+    internal long DiagVideoRingBytes { get { lock (_ringLock) return _videoBytes; } }
+    internal int DiagAudioRingCount { get { lock (_ringLock) return _audioRing.Count; } }
+    internal long DiagEncSamples => _enc?.SamplesOut ?? 0;
+    internal long DiagEncKeyframes => _enc?.KeyFramesOut ?? 0;
+    internal long DiagArrived => _cap?.ArrivedCount ?? 0;
 
     /// <summary>The GPU buffer handles MP4 full-screen / single-monitor capture (same as the GPU recorder).</summary>
     public static bool CanHandle(RecordingProfile p) =>
@@ -108,7 +173,17 @@ public sealed class GpuReplayBuffer : IReplayBuffer, IDisposable
 
                 _gpu = gpu; _cap = cap; _conv = conv; _enc = enc; _audio = audio;
                 _videoOutType = enc.CloneOutputType(); // own an independent copy; the encoder owns its own
-                lock (_ringLock) { _videoRing.Clear(); _audioRing.Clear(); _videoBytes = 0; _audioAnchored = false; _audioSamples = 0; }
+
+                // Size the fixed arenas from the window + bitrate (+ headroom for VBR overshoot), capped.
+                long vCap = Math.Clamp((long)(bufferSeconds * (videoBps / 8.0) * 1.3) + 8L * 1024 * 1024, 16L * 1024 * 1024, MaxRingBytes);
+                long aCap = Math.Clamp((long)bufferSeconds * AudioRate * AudioChannels * 2 * 3 / 2 + 1024 * 1024, 1L * 1024 * 1024, MaxRingBytes);
+                lock (_ringLock)
+                {
+                    _videoRing.Clear(); _audioRing.Clear();
+                    _videoArena = new ByteArena(vCap); _audioArena = new ByteArena(aCap);
+                    _videoWritePos = _audioWritePos = 0; _videoBytes = _audioBytes = 0;
+                    _audioAnchored = false; _audioSamples = 0;
+                }
 
                 try { timeBeginPeriod(1); _timerRaised = true; } catch { }
                 _running = true;
@@ -170,28 +245,39 @@ public sealed class GpuReplayBuffer : IReplayBuffer, IDisposable
     {
         lock (_ringLock)
         {
-            _videoRing.Add(s);
-            _videoBytes += s.Data.Length;
+            var arena = _videoArena;
+            if (arena is null) return;          // stopped / not started
+            int len = s.Length;
+            if (len <= 0 || len > arena.Capacity) return; // skip a frame larger than the whole arena (pathological)
 
-            // Evict only when a keyframe arrives (eviction can only advance at GOP boundaries) — keeps the
-            // ring starting on a keyframe and bounds per-frame cost. Cut by time, then tighten for the byte cap.
+            // Make room: drop the oldest frames until the new one fits in the fixed arena (VBR-spike guard).
+            int drop = 0; long live = _videoBytes;
+            while (drop < _videoRing.Count && live + len > arena.Capacity) { live -= _videoRing[drop].Length; drop++; }
+            if (drop > 0)
+            {
+                // Prefer to leave the ring starting on a keyframe (a saved clip must start on one). Advance past
+                // any leading P-frames the byte-drop exposed — but only if a keyframe still remains (never drop
+                // everything; the next keyframe will re-establish the start).
+                int kfDrop = drop; long kfLive = live;
+                while (kfDrop < _videoRing.Count && !_videoRing[kfDrop].KeyFrame) { kfLive -= _videoRing[kfDrop].Length; kfDrop++; }
+                if (kfDrop < _videoRing.Count) { drop = kfDrop; live = kfLive; }
+                _videoBytes = live; _videoRing.RemoveRange(0, drop);
+            }
+
+            arena.Write(s.Data, 0, _videoWritePos, len);
+            _videoRing.Add(new VideoEntry(_videoWritePos, len, s.TimeNs, s.DurNs, s.KeyFrame));
+            _videoWritePos += len;
+            _videoBytes += len;
+
+            // Time eviction only at keyframes (a clip must start on one) — keeps ~_bufferNs of footage.
             if (!s.KeyFrame) return;
             long horizon = s.TimeNs - _bufferNs;
             int cut = 0;
             for (int i = 0; i < _videoRing.Count; i++)
                 if (_videoRing[i].KeyFrame && _videoRing[i].TimeNs <= horizon) cut = i;
-
-            if (_videoBytes > MaxRingBytes)
-            {
-                long bytesFromCut = 0;
-                for (int i = cut; i < _videoRing.Count; i++) bytesFromCut += _videoRing[i].Data.Length;
-                for (int i = cut + 1; i < _videoRing.Count && bytesFromCut > MaxRingBytes; i++)
-                    if (_videoRing[i].KeyFrame) { for (int j = cut; j < i; j++) bytesFromCut -= _videoRing[j].Data.Length; cut = i; }
-            }
-
             if (cut > 0)
             {
-                for (int i = 0; i < cut; i++) _videoBytes -= _videoRing[i].Data.Length;
+                for (int i = 0; i < cut; i++) _videoBytes -= _videoRing[i].Length;
                 _videoRing.RemoveRange(0, cut);
             }
         }
@@ -205,13 +291,13 @@ public sealed class GpuReplayBuffer : IReplayBuffer, IDisposable
         if (perChannel <= 0) return;
 
         long elapsed = clock.Elapsed.Ticks;
-        var copy = new byte[count];
-        Buffer.BlockCopy(pcm, 0, copy, 0, count);
 
-        // All anchor/sample-count state + the ring are mutated under one lock so audio TimeNs stays
-        // monotonic and a session reset (Start) can't interleave with a late callback.
+        // All anchor/sample-count state + the ring + the arena are mutated under one lock so audio TimeNs
+        // stays monotonic and a session reset (Start) can't interleave with a late callback.
         lock (_ringLock)
         {
+            var arena = _audioArena;
+            if (arena is null || count > arena.Capacity) return;
             if (!_audioAnchored)
             {
                 long bufDur = perChannel * 10_000_000L / AudioRate;
@@ -221,14 +307,23 @@ public sealed class GpuReplayBuffer : IReplayBuffer, IDisposable
             }
             long ts = _audioAnchorNs + _audioSamples * 10_000_000L / AudioRate;
             long dur = perChannel * 10_000_000L / AudioRate;
-            _audioRing.Add(new AudioPcmChunk { Pcm = copy, Count = count, TimeNs = ts, DurNs = dur });
+
+            // Make room in the fixed arena (defensive; the time eviction below normally keeps it under cap).
+            int drop = 0; long live = _audioBytes;
+            while (drop < _audioRing.Count && live + count > arena.Capacity) { live -= _audioRing[drop].Count; drop++; }
+            if (drop > 0) { _audioBytes = live; _audioRing.RemoveRange(0, drop); }
+
+            arena.Write(pcm, 0, _audioWritePos, count);
+            _audioRing.Add(new AudioEntry(_audioWritePos, count, ts, dur));
+            _audioWritePos += count;
+            _audioBytes += count;
             _audioSamples += perChannel;
 
             // Self-bound by the audio clock so a video stall can't grow the audio ring without limit.
             long aHorizon = ts - _bufferNs - 10_000_000L;
             int an = 0;
             while (an < _audioRing.Count && _audioRing[an].TimeNs < aHorizon) an++;
-            if (an > 0) _audioRing.RemoveRange(0, an);
+            if (an > 0) { for (int i = 0; i < an; i++) _audioBytes -= _audioRing[i].Count; _audioRing.RemoveRange(0, an); }
         }
     }
 
@@ -263,11 +358,23 @@ public sealed class GpuReplayBuffer : IReplayBuffer, IDisposable
                 if (startIdx < 0) return Task.FromResult<string?>(null); // no keyframe yet
 
                 startVideoNs = _videoRing[startIdx].TimeNs;
-                video = _videoRing.GetRange(startIdx, _videoRing.Count - startIdx).ToArray();
+                var vArena = _videoArena; var aArena = _audioArena;
+                if (vArena is null) return Task.FromResult<string?>(null);
+
+                // Copy the clip OUT of the circular arena into owned arrays, so the background mux is
+                // independent of the live ring (which keeps overwriting the arena as new frames arrive).
+                video = new EncodedVideoSample[_videoRing.Count - startIdx];
+                for (int i = startIdx; i < _videoRing.Count; i++)
+                {
+                    var e = _videoRing[i];
+                    video[i - startIdx] = new EncodedVideoSample { Data = vArena.Read(e.Offset, e.Length), Length = e.Length, TimeNs = e.TimeNs, DurNs = e.DurNs, KeyFrame = e.KeyFrame };
+                }
 
                 var aud = new List<AudioPcmChunk>();
-                foreach (var c in _audioRing)
-                    if (c.TimeNs + c.DurNs > startVideoNs && c.TimeNs <= newestNs) aud.Add(c);
+                if (aArena != null)
+                    foreach (var c in _audioRing)
+                        if (c.TimeNs + c.DurNs > startVideoNs && c.TimeNs <= newestNs)
+                            aud.Add(new AudioPcmChunk { Pcm = aArena.Read(c.Offset, c.Count), Count = c.Count, TimeNs = c.TimeNs, DurNs = c.DurNs });
                 audio = aud.ToArray();
             }
 
@@ -340,7 +447,7 @@ public sealed class GpuReplayBuffer : IReplayBuffer, IDisposable
                 if (writeVideo)
                 {
                     var s = video[vi++];
-                    WriteBytes(w, vIdx, s.Data, s.Data.Length, Math.Max(0, s.TimeNs - originNs), s.DurNs, s.KeyFrame);
+                    WriteBytes(w, vIdx, s.Data, s.Length, Math.Max(0, s.TimeNs - originNs), s.DurNs, s.KeyFrame);
                 }
                 else
                 {
@@ -401,7 +508,13 @@ public sealed class GpuReplayBuffer : IReplayBuffer, IDisposable
         try { _gpu?.Dispose(); } catch { }
         _audio = null; _enc = null; _conv = null; _cap = null; _gpu = null;
         _inputPool = null; _nv12Pool = null; _videoOutType = null; _clock = null;
-        lock (_ringLock) { _videoRing.Clear(); _audioRing.Clear(); }
+        lock (_ringLock)
+        {
+            _videoRing.Clear(); _audioRing.Clear();
+            try { _videoArena?.Dispose(); } catch { } try { _audioArena?.Dispose(); } catch { } // free native memory
+            _videoArena = null; _audioArena = null;
+            _videoBytes = _audioBytes = 0; _videoWritePos = _audioWritePos = 0;
+        }
         // Finalize the prior WGC item off the UI/STA thread so the next session's border retires (border-restart fix).
         ThreadPool.QueueUserWorkItem(_ => { try { GC.Collect(); GC.WaitForPendingFinalizers(); } catch { } });
     }
