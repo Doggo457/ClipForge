@@ -523,23 +523,31 @@ namespace Fragment.ViewModels
 
             try
             {
-                StatusText = "Saving clip...";
                 var profile = ActiveProfile();
                 string outputPath = BuildOutputPath(profile, "Clip");
 
-                string? saved = await active.SaveClipAsync(
-                    _settings.ClipLengthSeconds, outputPath);
+                // The clip's frames are snapshotted SYNCHRONOUSLY here — the moment is captured the instant you
+                // press the key. Only the file MUX/write runs on the returned background task (which can take a
+                // second or two for a long buffer). So start it WITHOUT awaiting, give instant feedback, then
+                // await just to confirm the write. Previously the sound/notification waited for the whole mux,
+                // so it felt like the keypress hadn't registered and you'd press again.
+                var saveTask = active.SaveClipAsync(_settings.ClipLengthSeconds, outputPath);
 
-                StatusText = saved != null
-                    ? $"Saved clip: {Path.GetFileName(saved)}"
-                    : "Failed to save clip";
-
-                if (saved != null)
+                // A null returned synchronously = the request was rejected up front: a previous clip is still
+                // writing, or the buffer hasn't captured a keyframe yet. Say so instead of a confusing "failed".
+                if (saveTask.IsCompleted && saveTask.Result is null)
                 {
-                    if (_settings.PlaySoundOnClip)
-                        try { System.Media.SystemSounds.Asterisk.Play(); } catch { }
-                    NotificationService.ShowClipSaved(saved);
+                    StatusText = "Still saving the previous clip…";
+                    return;
                 }
+
+                // Snapshot accepted — the clip is captured. Confirm immediately; the file finishes in the background.
+                if (_settings.PlaySoundOnClip) try { System.Media.SystemSounds.Asterisk.Play(); } catch { }
+                StatusText = "Clip saved";
+
+                string? saved = await saveTask;
+                if (saved != null) NotificationService.ShowClipSaved(saved);
+                else StatusText = "Failed to save clip";
             }
             catch (Exception ex)
             {
