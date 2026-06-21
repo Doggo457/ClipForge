@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Fragment.Models;
@@ -24,6 +25,49 @@ public sealed class VideoEditorService
         if (string.IsNullOrWhiteSpace(ffmpegPath))
             throw new ArgumentException("FFmpeg path must be provided.", nameof(ffmpegPath));
         _ffmpegPath = ffmpegPath;
+    }
+
+    /// <summary>
+    /// Probes a video's DISPLAY dimensions via ffmpeg, accounting for rotation metadata. Phone videos are
+    /// often coded landscape (e.g. 1280x720) with a 90° flag and auto-rotated to portrait on decode/export;
+    /// the WPF probe reports the CODED size (rotation ignored), so the editor canvas came out landscape and
+    /// the auto-rotated portrait frame got huge pillarbox bars. Returns the size the exported frame will
+    /// actually have so the canvas matches and there are no bars. Null if it can't be read.
+    /// </summary>
+    public (int Width, int Height)? ProbeDisplaySize(string file)
+    {
+        if (string.IsNullOrWhiteSpace(file) || !File.Exists(file)) return null;
+        try
+        {
+            var psi = new ProcessStartInfo(_ffmpegPath, "-hide_banner -i " + Quote(file))
+            {
+                RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true,
+            };
+            using var p = Process.Start(psi);
+            if (p is null) return null;
+            string err = p.StandardError.ReadToEnd();
+            p.WaitForExit(5000);
+
+            string? vline = null;
+            foreach (var line in err.Split('\n'))
+                if (line.Contains("Video:")) { vline = line; break; }
+            if (vline is null) return null;
+
+            var dm = Regex.Match(vline, @"\b(\d{2,5})x(\d{2,5})\b"); // the WxH on the video stream line
+            if (!dm.Success) return null;
+            int w = int.Parse(dm.Groups[1].Value), h = int.Parse(dm.Groups[2].Value);
+
+            // Display Matrix "rotation of ±90/270 degrees" → ffmpeg auto-rotates, so the displayed frame is
+            // the coded size with W/H swapped. (180° keeps the dimensions.)
+            var rm = Regex.Match(err, @"rotation of (-?\d+(?:\.\d+)?) degrees");
+            if (rm.Success)
+            {
+                int rot = ((int)Math.Round(Math.Abs(double.Parse(rm.Groups[1].Value, CultureInfo.InvariantCulture)))) % 180;
+                if (rot == 90) (w, h) = (h, w);
+            }
+            return (w, h);
+        }
+        catch { return null; }
     }
 
     // ------------------------------------------------------------------ thumbnails

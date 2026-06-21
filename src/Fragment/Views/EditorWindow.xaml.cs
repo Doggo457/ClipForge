@@ -149,7 +149,14 @@ public partial class EditorWindow : Window
             Cleanup();
 
             if (dur <= 0) { StatusText.Text = "Couldn't read that file's length."; return; }
-            if (makePrimary && _primaryW <= 0 && vw > 0) { _primaryW = vw; _primaryH = vh; }
+            if (makePrimary && _primaryW <= 0)
+            {
+                // Use ffmpeg's rotation-aware DISPLAY size for the export canvas, not WPF's coded size — else a
+                // phone video (coded landscape + 90° flag, auto-rotated to portrait on export) gets black bars.
+                var disp = _editor.ProbeDisplaySize(path);
+                if (disp is { } d && d.Width > 0) { _primaryW = d.Width; _primaryH = d.Height; }
+                else if (vw > 0) { _primaryW = vw; _primaryH = vh; }
+            }
 
             _segments.Add(new EditorSegment(path, 0, dur));
             UpdateTotals();
