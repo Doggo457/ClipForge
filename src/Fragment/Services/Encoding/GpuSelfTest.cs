@@ -26,7 +26,8 @@ internal static class GpuSelfTest
 
         try
         {
-            if (mode == "12") RunAudioSaveSyncTest(W);
+            if (mode == "13") RunWindowCapture(W);
+            else if (mode == "12") RunAudioSaveSyncTest(W);
             else if (mode == "11") RunAudioLagTest(W);
             else if (mode == "10") RunWgcCadenceTest(W);
             else if (mode == "9") RunVariablePtsTest(W);
@@ -329,6 +330,39 @@ internal static class GpuSelfTest
 
         buf.Stop();
         W("RESULT: trace complete");
+    }
+
+    // Proves WGC per-WINDOW capture: lists capturable windows, then captures the FOREGROUND window via
+    // CreateForWindow and dumps a frame. FRAGMENT_GPUTEST_HWND=<hex> targets a specific window instead.
+    private static void RunWindowCapture(Action<string> W)
+    {
+        var wins = WindowEnumerator.List();
+        W($"capturable windows: {wins.Count}");
+        int shown = 0;
+        foreach (var win in wins) { if (shown++ >= 12) break; W($"  hwnd=0x{win.Handle.ToInt64():X} pid={win.ProcessId,6} [{win.ProcessName}] {win.Title}"); }
+
+        IntPtr hwnd = WindowEnumerator.Foreground();
+        var env = Environment.GetEnvironmentVariable("FRAGMENT_GPUTEST_HWND");
+        if (!string.IsNullOrWhiteSpace(env) && long.TryParse(env, System.Globalization.NumberStyles.HexNumber, null, out long h)) hwnd = (IntPtr)h;
+        W($"capturing window 0x{hwnd.ToInt64():X} \"{WindowEnumerator.TitleOf(hwnd)}\"");
+
+        using var gpu = new GpuRecordingDevice();
+        using var cap = new GpuWgcCapture(gpu, hwnd, captureCursor: true, isWindow: true);
+        if (!cap.WaitForFirstFrame(3000, out int w, out int hh)) { W("RESULT: FAIL - no window frame in 3s"); return; }
+        W($"first window frame {w}x{hh}, arrived={cap.ArrivedCount}");
+
+        // Scale the (any-size) window into a FIXED 1280x720 canvas with letterbox bars — exactly what the
+        // recorder/replay-buffer will do so the encoder size stays constant across window resizes/switches.
+        using var conv = new VideoProcessorConverter(gpu, 1280, 720, 60);
+        using var nv12 = conv.CreateNv12Texture();
+        for (int i = 0; i < 6; i++) { cap.PullLatest(); System.Threading.Thread.Sleep(20); }
+        var src = cap.LatestTexture;
+        if (src is null) { W("RESULT: FAIL - no latest texture"); return; }
+        conv.ConvertScaled(src, w, hh, nv12);
+        gpu.Context.Flush();
+        DumpNv12(gpu, nv12, conv.Width, conv.Height, Path.Combine(Dir, "window_capture.png"));
+        W($"wrote window_capture.png ({w}x{hh} window -> {conv.Width}x{conv.Height} canvas, letterboxed)");
+        W("RESULT: PASS");
     }
 
     // Regression test for the clip-save A/V desync: a clip save pauses capture (_saveInFlight) while the muxer

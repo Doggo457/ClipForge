@@ -35,6 +35,10 @@ public sealed class GpuWgcCapture : IDisposable
     private ID3D11Texture2D? _latest; // app-owned BGRA copy of the most recent frame (on the GPU)
     private int _w, _h;
     private bool _hasFrame;
+    private readonly bool _isWindow;            // window capture re-sizes; monitor capture never does
+    private Windows.Graphics.SizeInt32 _poolSize; // current frame-pool size (tracked so we Recreate on window resize)
+    private const int PoolBuffers = 3;
+    private const DirectXPixelFormat PoolFormat = DirectXPixelFormat.B8G8R8A8UIntNormalized;
     private volatile bool _disposed;
     private int _disposeGuard;
     private long _arrivedCount;
@@ -46,21 +50,22 @@ public sealed class GpuWgcCapture : IDisposable
     /// directly — letting the feeder convert straight from it with no intermediate copy. Feeder thread only.</summary>
     public ID3D11Texture2D? LatestTexture => _hasFrame ? _latest : null;
 
-    public GpuWgcCapture(GpuRecordingDevice gpu, IntPtr hmon, bool captureCursor)
+    /// <param name="handle">A monitor HMONITOR (isWindow=false) or a window HWND (isWindow=true).</param>
+    public GpuWgcCapture(GpuRecordingDevice gpu, IntPtr handle, bool captureCursor, bool isWindow = false)
     {
         _device = gpu.Device;
         _context = gpu.Context;
         _winrtDevice = gpu.WinRtDevice;
+        _isWindow = isWindow;
 
         var interop = GraphicsCaptureItem.As<IGraphicsCaptureItemInterop>();
         Guid iid = GraphicsCaptureItemIid;
-        IntPtr itemAbi = interop.CreateForMonitor(hmon, ref iid);
+        IntPtr itemAbi = isWindow ? interop.CreateForWindow(handle, ref iid) : interop.CreateForMonitor(handle, ref iid);
         _item = MarshalInspectable<GraphicsCaptureItem>.FromAbi(itemAbi);
         Marshal.Release(itemAbi);
 
-        var size = _item.Size;
-        _framePool = Direct3D11CaptureFramePool.CreateFreeThreaded(
-            _winrtDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized, 3, size);
+        _poolSize = _item.Size;
+        _framePool = Direct3D11CaptureFramePool.CreateFreeThreaded(_winrtDevice, PoolFormat, PoolBuffers, _poolSize);
         _session = _framePool.CreateCaptureSession(_item);
 
         try
@@ -116,6 +121,20 @@ public sealed class GpuWgcCapture : IDisposable
         Direct3D11CaptureFrame? latest = null, f;
         while ((f = _framePool.TryGetNextFrame()) != null) { latest?.Dispose(); latest = f; }
         if (latest is null) return false;
+
+        // A captured WINDOW changes size when the user resizes/maximizes it; the frame pool must be Recreated to
+        // the new content size or frames come back clipped/letterboxed in the old buffer. (Monitors never resize.)
+        if (_isWindow)
+        {
+            var cs = latest.ContentSize;
+            if (cs.Width > 0 && cs.Height > 0 && (cs.Width != _poolSize.Width || cs.Height != _poolSize.Height))
+            {
+                _poolSize = cs;
+                try { _framePool.Recreate(_winrtDevice, PoolFormat, PoolBuffers, cs); } catch { }
+                latest.Dispose();
+                return false; // the next frame arrives at the new size
+            }
+        }
 
         using (latest)
         using (var src = GetTexture(latest.Surface))
