@@ -8,7 +8,9 @@ public enum CaptureSource
     FullScreen,
     Monitor,
     Region,
-    Window
+    Window,
+    /// <summary>Follow whichever window is focused, switching capture as the user changes windows.</summary>
+    ActiveWindow
 }
 
 /// <summary>

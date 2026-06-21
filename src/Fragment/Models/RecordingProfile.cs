@@ -28,8 +28,13 @@ public class RecordingProfile
     public int RegionWidth { get; set; }
     public int RegionHeight { get; set; }
 
-    /// <summary>Window title to capture when <see cref="Source"/> is Window.</summary>
+    /// <summary>Window title to capture when <see cref="Source"/> is Window (display + best-effort re-match).</summary>
     public string? WindowTitle { get; set; }
+
+    /// <summary>HWND of the window to capture when <see cref="Source"/> is Window. Session-only (a window
+    /// handle isn't stable across launches), so it is never persisted; the picker sets it before recording.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IntPtr WindowHandle { get; set; }
 
     // ---- Video ------------------------------------------------------------
 

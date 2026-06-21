@@ -27,6 +27,7 @@ public sealed class GpuVideoRecorder : IDisposable
 
     private readonly GpuRecordingDevice _gpu;
     private readonly GpuWgcCapture _cap;
+    private readonly CaptureTarget _target;          // monitor vs window (+ follow-active); drives the feeder path
     private readonly VideoProcessorConverter _conv;
     private readonly MfH264SinkWriter _writer;
     private readonly int _fps;
@@ -54,21 +55,26 @@ public sealed class GpuVideoRecorder : IDisposable
     public long ArrivedCount => _cap.ArrivedCount;
     public bool HasAudio => _audio != null;
 
-    public GpuVideoRecorder(GpuRecordingDevice gpu, IntPtr hmon, string path, int fps, int bitrate,
-        bool captureCursor, AudioMode audio = AudioMode.None, int audioBitrateBps = 160_000,
+    public GpuVideoRecorder(GpuRecordingDevice gpu, CaptureTarget target, string path, int fps, int bitrate,
+        AudioMode audio = AudioMode.None, int audioBitrateBps = 160_000,
         MicProcessing micProc = default, string? micDevice = null, Action<string>? diag = null)
     {
         _diag = diag;
         _gpu = gpu;
         _fps = fps > 0 ? fps : 60;
-        _cap = new GpuWgcCapture(gpu, hmon, captureCursor);
+        _target = target;
+        _cap = new GpuWgcCapture(gpu, target.Handle, target.CaptureCursor, target.IsWindow, target.FollowActive);
         if (!_cap.WaitForFirstFrame(5000, out int w, out int h))
         {
             _cap.Dispose();
             throw new InvalidOperationException("GPU recorder: no frame captured within 5s.");
         }
 
-        _conv = new VideoProcessorConverter(gpu, w, h, _fps);
+        // Window/active capture scales into a FIXED canvas (so the encoder size never changes); monitor capture
+        // uses the source size directly. A fixed CanvasWidth (active-window mode) overrides the first-frame size.
+        int canvasW = target.CanvasWidth > 0 ? target.CanvasWidth : w;
+        int canvasH = target.CanvasHeight > 0 ? target.CanvasHeight : h;
+        _conv = new VideoProcessorConverter(gpu, canvasW, canvasH, _fps);
 
         bool wantSystem = audio is AudioMode.SystemOnly or AudioMode.SystemAndMic;
         bool wantMic = audio is AudioMode.MicOnly or AudioMode.SystemAndMic;
@@ -88,7 +94,7 @@ public sealed class GpuVideoRecorder : IDisposable
 
         for (int i = 0; i < PoolSize; i++)
         {
-            _inputPool[i] = _conv.CreateInputTexture();
+            if (!target.IsWindow) _inputPool[i] = _conv.CreateInputTexture(); // window mode scales straight from the capture
             _nv12Pool[i] = _conv.CreateNv12Texture();
         }
     }
@@ -130,17 +136,31 @@ public sealed class GpuVideoRecorder : IDisposable
             }
 
             int slot = (int)(frame % PoolSize);
-            var input = _inputPool[slot];
             var nv12 = _nv12Pool[slot];
 
             bool trace = frame < 3 || frame % 600 == 0;
             try
             {
-                // Pull + convert + encode, all on this one thread. If capture stalled, CopyLatestInto
-                // re-copies the previous frame, so we still emit on cadence (frame-repeat) → smooth motion.
-                if (_cap.CopyLatestInto(input))
+                // Pull + convert + encode, all on this one thread. If capture stalled, the previous frame is
+                // re-used so we still emit on cadence (frame-repeat) → smooth motion.
+                bool got;
+                if (_target.IsWindow)
                 {
-                    _conv.Convert(input, nv12);
+                    // Window / active-window: scale the (any-size, possibly switching) source into the fixed canvas.
+                    _cap.PullLatest();
+                    var src = _cap.LatestTexture;
+                    if (src is not null) { _conv.ConvertScaled(src, _cap.LatestWidth, _cap.LatestHeight, nv12); got = true; }
+                    else got = false;
+                }
+                else
+                {
+                    var input = _inputPool[slot];
+                    if (_cap.CopyLatestInto(input)) { _conv.Convert(input, nv12); got = true; }
+                    else got = false;
+                }
+
+                if (got)
+                {
                     _gpu.Context.Flush(); // submit the Blt so the encoder sees finished NV12
                     long ts = _clock!.Elapsed.Ticks; // 100-ns real time at emit (shared with audio)
                     _writer.WriteFrame(nv12, ts, frameDur);

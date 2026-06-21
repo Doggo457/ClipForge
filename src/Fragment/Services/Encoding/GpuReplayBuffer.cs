@@ -107,6 +107,7 @@ public sealed class GpuReplayBuffer : IReplayBuffer, IDisposable
     private int _fps, _audioBitrate;
     private long _bufferNs;
     private bool _wantAudio;
+    private bool _captureIsWindow;  // window/active-window capture letterbox-scales into the fixed canvas
 
     private long _audioSamples, _audioAnchorNs;
     private bool _audioAnchored;
@@ -133,9 +134,10 @@ public sealed class GpuReplayBuffer : IReplayBuffer, IDisposable
     internal long DiagVideoClockNs => _clock?.Elapsed.Ticks ?? 0;
     internal void DebugHoldSave(int ms) { _saveInFlight = true; try { Thread.Sleep(ms); } finally { _saveInFlight = false; } }
 
-    /// <summary>The GPU buffer handles MP4 full-screen / single-monitor capture (same as the GPU recorder).</summary>
+    /// <summary>The GPU buffer handles MP4 full-screen / monitor / window / active-window capture.</summary>
     public static bool CanHandle(RecordingProfile p) =>
-        p.Container == OutputContainer.Mp4 && p.Source is CaptureSource.FullScreen or CaptureSource.Monitor;
+        p.Container == OutputContainer.Mp4 &&
+        p.Source is CaptureSource.FullScreen or CaptureSource.Monitor or CaptureSource.Window or CaptureSource.ActiveWindow;
 
     public void Start(RecordingProfile profile, int bufferSeconds)
     {
@@ -158,14 +160,18 @@ public sealed class GpuReplayBuffer : IReplayBuffer, IDisposable
             try
             {
                 gpu = new GpuRecordingDevice();
-                IntPtr hmon = ResolveMonitor(profile);
-                var cap = new GpuWgcCapture(gpu, hmon, profile.CaptureCursor);
+                var target = CaptureTarget.Resolve(profile);
+                _captureIsWindow = target.IsWindow;
+                var cap = new GpuWgcCapture(gpu, target.Handle, target.CaptureCursor, target.IsWindow, target.FollowActive);
                 if (!cap.WaitForFirstFrame(2500, out int w, out int h))
                 {
                     cap.Dispose(); gpu.Dispose();
                     throw new InvalidOperationException("Replay buffer: no frame captured.");
                 }
-                var conv = new VideoProcessorConverter(gpu, w, h, _fps);
+                // Window/active capture scales into a fixed canvas so the encoder size never changes mid-stream.
+                int canvasW = target.CanvasWidth > 0 ? target.CanvasWidth : w;
+                int canvasH = target.CanvasHeight > 0 ? target.CanvasHeight : h;
+                var conv = new VideoProcessorConverter(gpu, canvasW, canvasH, _fps);
                 var enc = new MfH264EncoderMft(gpu, conv.Width, conv.Height, _fps, videoBps, OnEncodedVideo);
 
                 _nv12Pool = new ID3D11Texture2D[PoolSize];
@@ -236,7 +242,10 @@ public sealed class GpuReplayBuffer : IReplayBuffer, IDisposable
                     if (src is not null)                      // null only before the very first frame
                     {
                         int slot = (int)(frame % PoolSize);
-                        _conv!.Convert(src, _nv12Pool![slot]); // convert straight from the capture texture (no copy)
+                        if (_captureIsWindow)                  // letterbox-scale the (any-size) window into the canvas
+                            _conv!.ConvertScaled(src, _cap.LatestWidth, _cap.LatestHeight, _nv12Pool![slot]);
+                        else
+                            _conv!.Convert(src, _nv12Pool![slot]); // monitor: straight BGRA→NV12, no scaling
                         _gpu!.Context.Flush();
                         if (_enc!.TryConsumeNeedInput())
                             _enc.SubmitFrame(_nv12Pool[slot], _clock.Elapsed.Ticks, frameDur);
@@ -556,16 +565,6 @@ public sealed class GpuReplayBuffer : IReplayBuffer, IDisposable
         }
         // Finalize the prior WGC item off the UI/STA thread so the next session's border retires (border-restart fix).
         ThreadPool.QueueUserWorkItem(_ => { try { GC.Collect(); GC.WaitForPendingFinalizers(); } catch { } });
-    }
-
-    private static IntPtr ResolveMonitor(RecordingProfile p)
-    {
-        if (p.Source == CaptureSource.Monitor)
-        {
-            var mon = MonitorEnumerator.GetByIndex(p.MonitorIndex);
-            return mon is not null ? WgcCapture.MonitorFromPoint(mon.X + 1, mon.Y + 1) : WgcCapture.MonitorFromPoint(0, 0);
-        }
-        return WgcCapture.MonitorFromPoint(0, 0);
     }
 
     public void Dispose() => Stop();

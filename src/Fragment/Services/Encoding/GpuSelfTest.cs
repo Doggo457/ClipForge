@@ -26,7 +26,8 @@ internal static class GpuSelfTest
 
         try
         {
-            if (mode == "13") RunWindowCapture(W);
+            if (mode == "14") RunWindowReplay(W);
+            else if (mode == "13") RunWindowCapture(W);
             else if (mode == "12") RunAudioSaveSyncTest(W);
             else if (mode == "11") RunAudioLagTest(W);
             else if (mode == "10") RunWgcCadenceTest(W);
@@ -86,11 +87,11 @@ internal static class GpuSelfTest
     private static void RunRecord(Action<string> W)
     {
         using var gpu = new GpuRecordingDevice();
-        IntPtr hmon = WgcCapture.MonitorFromPoint(0, 0); // primary
+        var target = new CaptureTarget { Handle = WgcCapture.MonitorFromPoint(0, 0), IsWindow = false, CaptureCursor = true };
         string outPath = Path.Combine(Dir, "gpu_record.mp4");
         try { File.Delete(outPath); } catch { }
 
-        using (var rec = new GpuVideoRecorder(gpu, hmon, outPath, 60, 16_000_000, captureCursor: true, audio: Fragment.Models.AudioMode.SystemOnly, diag: W))
+        using (var rec = new GpuVideoRecorder(gpu, target, outPath, 60, 16_000_000, audio: Fragment.Models.AudioMode.SystemOnly, diag: W))
         {
             var proc = System.Diagnostics.Process.GetCurrentProcess();
             W($"recording 10s at {rec.Width}x{rec.Height}@60 (audio={rec.HasAudio}) to gpu_record.mp4 ...");
@@ -330,6 +331,34 @@ internal static class GpuSelfTest
 
         buf.Stop();
         W("RESULT: trace complete");
+    }
+
+    // End-to-end: the replay buffer capturing the ACTIVE WINDOW (follow-active), scaling into the fixed canvas,
+    // then saving a clip. Proves window capture -> letterbox scale -> encode -> save through the real buffer.
+    // FRAGMENT_GPUTEST_SOURCE=window targets the foreground window fixed (no follow) instead of active-follow.
+    private static void RunWindowReplay(Action<string> W)
+    {
+        bool fixedWindow = Environment.GetEnvironmentVariable("FRAGMENT_GPUTEST_SOURCE") == "window";
+        var profile = new Fragment.Models.RecordingProfile
+        {
+            Source = fixedWindow ? Fragment.Models.CaptureSource.Window : Fragment.Models.CaptureSource.ActiveWindow,
+            WindowHandle = fixedWindow ? WindowEnumerator.Foreground() : IntPtr.Zero,
+            Container = Fragment.Models.OutputContainer.Mp4,
+            Fps = 60, VideoBitrateKbps = 12000, AudioBitrateKbps = 160,
+            Audio = Fragment.Models.AudioMode.SystemOnly, CaptureCursor = true,
+        };
+        W($"replay buffer source={profile.Source}, foreground=\"{WindowEnumerator.TitleOf(WindowEnumerator.Foreground())}\"");
+        using var buf = new GpuReplayBuffer { Diag = _ => { } };
+        buf.Start(profile, bufferSeconds: 15);
+        W($"IsRunning={buf.IsRunning}");
+        System.Threading.Thread.Sleep(8000);
+        string clip = Path.Combine(Dir, "window_replay.mp4");
+        try { File.Delete(clip); } catch { }
+        var r = buf.SaveClipAsync(6, clip).GetAwaiter().GetResult();
+        buf.Stop();
+        long sz = File.Exists(clip) ? new FileInfo(clip).Length : 0;
+        W($"saved: {(r ?? "null")} ({sz:N0} bytes)");
+        W(sz > 100_000 ? "RESULT: PASS" : "RESULT: FAIL - clip missing/too small");
     }
 
     // Proves WGC per-WINDOW capture: lists capturable windows, then captures the FOREGROUND window via

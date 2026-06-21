@@ -30,10 +30,10 @@ public sealed class GpuScreenRecorder : IScreenRecorder
     public event EventHandler<string>? Error;
 #pragma warning restore CS0067
 
-    /// <summary>The GPU engine handles MP4 full-screen / single-monitor capture (Media Foundation muxes MP4).</summary>
+    /// <summary>The GPU engine handles MP4 full-screen / monitor / window / active-window capture (MF muxes MP4).</summary>
     public static bool CanHandle(RecordingProfile p) =>
         p.Container == OutputContainer.Mp4 &&
-        p.Source is CaptureSource.FullScreen or CaptureSource.Monitor;
+        p.Source is CaptureSource.FullScreen or CaptureSource.Monitor or CaptureSource.Window or CaptureSource.ActiveWindow;
 
     public async Task StartAsync(RecordingProfile profile)
     {
@@ -50,7 +50,7 @@ public sealed class GpuScreenRecorder : IScreenRecorder
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
-            IntPtr hmon = ResolveMonitor(profile);
+            var target = CaptureTarget.Resolve(profile);
 
             await Task.Run(() =>
             {
@@ -58,8 +58,8 @@ public sealed class GpuScreenRecorder : IScreenRecorder
                 GpuVideoRecorder rec;
                 try
                 {
-                    rec = new GpuVideoRecorder(dev, hmon, outputPath, fps, videoBps,
-                        profile.CaptureCursor, profile.Audio, audioBps, MicProcFor(profile), profile.MicDevice);
+                    rec = new GpuVideoRecorder(dev, target, outputPath, fps, videoBps,
+                        profile.Audio, audioBps, MicProcFor(profile), profile.MicDevice);
                 }
                 catch { dev.Dispose(); throw; }
 
@@ -100,16 +100,4 @@ public sealed class GpuScreenRecorder : IScreenRecorder
     internal static MicProcessing MicProcFor(RecordingProfile p) => new(
         p.MicNoiseGateEnabled, p.MicNoiseGateThresholdDb,
         p.MicNoiseSuppressionEnabled, p.MicNoiseSuppressionStrength / 100f);
-
-    private static IntPtr ResolveMonitor(RecordingProfile p)
-    {
-        if (p.Source == CaptureSource.Monitor)
-        {
-            var mon = MonitorEnumerator.GetByIndex(p.MonitorIndex);
-            return mon is not null
-                ? WgcCapture.MonitorFromPoint(mon.X + 1, mon.Y + 1)
-                : WgcCapture.MonitorFromPoint(0, 0);
-        }
-        return WgcCapture.MonitorFromPoint(0, 0); // primary
-    }
 }
