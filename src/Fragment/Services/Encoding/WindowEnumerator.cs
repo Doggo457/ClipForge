@@ -9,6 +9,7 @@ namespace Fragment.Services.Encoding;
 public readonly record struct CapturableWindow(IntPtr Handle, string Title, uint ProcessId, string ProcessName)
 {
     public string Display => string.IsNullOrEmpty(ProcessName) ? Title : $"{Title}  —  {ProcessName}";
+    public override string ToString() => Display; // friendly text in the picker even without DisplayMemberPath
 }
 
 /// <summary>
@@ -41,6 +42,8 @@ public static class WindowEnumerator
     public static IntPtr Foreground() => GetForegroundWindow();
 
     public static bool IsValid(IntPtr hwnd) => hwnd != IntPtr.Zero && IsWindowVisible(hwnd);
+
+    public static uint ProcessIdOf(IntPtr hwnd) { GetWindowThreadProcessId(hwnd, out uint pid); return pid; }
 
     public static string TitleOf(IntPtr hwnd)
     {

@@ -155,10 +155,17 @@
                                   DisplayMemberPath="Display"
                                   IsEnabled="{Binding IsMonitor}"/>
 
-                        <TextBlock Grid.Row="3" Grid.Column="0" Style="{StaticResource LabelText}" Text="Window title"/>
-                        <TextBox Grid.Row="3" Grid.Column="1"
-                                 Text="{Binding WindowTitle}"
-                                 IsEnabled="{Binding IsWindow}"/>
+                        <TextBlock Grid.Row="3" Grid.Column="0" Style="{StaticResource LabelText}" Text="Window"/>
+                        <DockPanel Grid.Row="3" Grid.Column="1" LastChildFill="True">
+                            <Button DockPanel.Dock="Right" Content="&#x21BB;" Width="34" Margin="6,0,0,0"
+                                    ToolTip="Refresh the window list"
+                                    Command="{Binding RefreshWindowsCommand}" IsEnabled="{Binding IsWindow}"/>
+                            <ComboBox ItemsSource="{Binding Windows}"
+                                      SelectedItem="{Binding SelectedWindow}"
+                                      DisplayMemberPath="Display"
+                                      IsEnabled="{Binding IsWindow}"
+                                      ToolTip="Pick a window to record (Source = Window). Source = ActiveWindow follows whatever you focus, so no pick is needed."/>
+                        </DockPanel>
 
                         <TextBlock Grid.Row="4" Grid.ColumnSpan="2" Style="{StaticResource SectionHeader}" Text="Region (used when Source = Region)"/>
 

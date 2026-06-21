@@ -22,6 +22,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private readonly RecordingProfile _profile;
     private DeviceEnumerator? _deviceEnumerator;
     private MonitorInfo? _selectedMonitor;
+    private CapturableWindow? _selectedWindow;
 
     public SettingsViewModel(AppSettings settings)
     {
@@ -50,10 +51,14 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             ?? Monitors.FirstOrDefault(m => m.IsPrimary)
             ?? Monitors.FirstOrDefault();
 
+        Windows = new ObservableCollection<CapturableWindow>();
+
         BrowseOutputFolderCommand = new RelayCommand(_ => BrowseOutputFolder?.Invoke());
         RefreshDevicesCommand = new RelayCommand(async _ => await RefreshDevicesAsync());
         SaveCommand = new RelayCommand(_ => Save());
         ToggleMonitorCommand = new RelayCommand(_ => ToggleMonitor());
+        RefreshWindowsCommand = new RelayCommand(_ => RefreshWindows());
+        RefreshWindows();
 
         // Attempt to wire up the device enumerator if FFmpeg is available.
         var ffmpeg = FfmpegLocator.Find(_settings.FfmpegPath);
@@ -93,12 +98,13 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public CaptureSource Source
     {
         get => _profile.Source;
-        set { if (_profile.Source != value) { _profile.Source = value; OnPropertyChanged(); OnPropertyChanged(nameof(IsRegion)); OnPropertyChanged(nameof(IsMonitor)); OnPropertyChanged(nameof(IsWindow)); } }
+        set { if (_profile.Source != value) { _profile.Source = value; OnPropertyChanged(); OnPropertyChanged(nameof(IsRegion)); OnPropertyChanged(nameof(IsMonitor)); OnPropertyChanged(nameof(IsWindow)); OnPropertyChanged(nameof(IsActiveWindow)); if (value == CaptureSource.Window) RefreshWindows(); } }
     }
 
     public bool IsRegion => _profile.Source == CaptureSource.Region;
     public bool IsMonitor => _profile.Source == CaptureSource.Monitor;
     public bool IsWindow => _profile.Source == CaptureSource.Window;
+    public bool IsActiveWindow => _profile.Source == CaptureSource.ActiveWindow;
 
     public int MonitorIndex
     {
@@ -153,6 +159,32 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         get => _profile.WindowTitle;
         set { if (_profile.WindowTitle != value) { _profile.WindowTitle = value; OnPropertyChanged(); } }
+    }
+
+    /// <summary>Capturable top-level windows for the "pick a window" picker (Source = Window).</summary>
+    public ObservableCollection<CapturableWindow> Windows { get; }
+
+    public CapturableWindow? SelectedWindow
+    {
+        get => _selectedWindow;
+        set
+        {
+            _selectedWindow = value;
+            if (value is { } w) { _profile.WindowHandle = w.Handle; _profile.WindowTitle = w.Title; OnPropertyChanged(nameof(WindowTitle)); }
+            OnPropertyChanged();
+        }
+    }
+
+    public ICommand RefreshWindowsCommand { get; }
+
+    /// <summary>Re-enumerate open windows and re-select the saved one by title (the HWND isn't persisted).</summary>
+    private void RefreshWindows()
+    {
+        Windows.Clear();
+        foreach (var w in WindowEnumerator.List()) Windows.Add(w);
+        var match = Windows.FirstOrDefault(w => w.Title == _profile.WindowTitle);
+        if (match.Handle == IntPtr.Zero) match = Windows.FirstOrDefault();
+        if (match.Handle != IntPtr.Zero) SelectedWindow = match;
     }
 
     public bool CaptureCursor
