@@ -26,7 +26,8 @@ internal static class GpuSelfTest
 
         try
         {
-            if (mode == "16") RunFollowFallbackTest(W);
+            if (mode == "17") RunSettingsRoundTrip(W);
+            else if (mode == "16") RunFollowFallbackTest(W);
             else if (mode == "14") RunWindowReplay(W);
             else if (mode == "13") RunWindowCapture(W);
             else if (mode == "12") RunAudioSaveSyncTest(W);
@@ -332,6 +333,43 @@ internal static class GpuSelfTest
 
         buf.Stop();
         W("RESULT: trace complete");
+    }
+
+    // Reproduces the EXACT settings-dialog save flow (Clone -> edit the clone -> CopyFrom -> Save -> reload)
+    // to find why settings don't persist across restarts. Non-destructive: backs up + restores settings.json.
+    private static void RunSettingsRoundTrip(Action<string> W)
+    {
+        string path = SettingsService.SettingsPath;
+        string? backup = File.Exists(path) ? File.ReadAllText(path) : null;
+        try
+        {
+            var live = SettingsService.Load();                  // what MainViewModel holds
+            var clone = live.Clone();                           // what the dialog edits
+            clone.ClipLengthSeconds = clone.ClipLengthSeconds == 77 ? 78 : 77;
+            clone.UseGpuEngine = !clone.UseGpuEngine;
+            clone.ActiveProfile().Fps = clone.ActiveProfile().Fps == 47 ? 48 : 47;
+            clone.ActiveProfile().Source = Fragment.Models.CaptureSource.ActiveWindow;
+            clone.ActiveProfile().VideoBitrateKbps = 23456;
+            int wantClip = clone.ClipLengthSeconds, wantFps = clone.ActiveProfile().Fps; bool wantGpu = clone.UseGpuEngine;
+
+            live.CopyFrom(clone);                               // dialog Save step 1
+            SettingsService.Save(live);                         // dialog Save step 2 (writes disk)
+
+            var reloaded = SettingsService.Load();              // next app launch
+            var p = reloaded.ActiveProfile();
+            W($"ClipLengthSeconds: got {reloaded.ClipLengthSeconds}, want {wantClip} -> {(reloaded.ClipLengthSeconds == wantClip ? "OK" : "LOST")}");
+            W($"profile.Fps: got {p.Fps}, want {wantFps} -> {(p.Fps == wantFps ? "OK" : "LOST")}");
+            W($"profile.Source: got {p.Source}, want ActiveWindow -> {(p.Source == Fragment.Models.CaptureSource.ActiveWindow ? "OK" : "LOST")}");
+            W($"profile.VideoBitrateKbps: got {p.VideoBitrateKbps}, want 23456 -> {(p.VideoBitrateKbps == 23456 ? "OK" : "LOST")}");
+            W($"UseGpuEngine: got {reloaded.UseGpuEngine}, want {wantGpu} -> {(reloaded.UseGpuEngine == wantGpu ? "OK" : "LOST")}");
+            bool ok = reloaded.ClipLengthSeconds == wantClip && p.Fps == wantFps && p.Source == Fragment.Models.CaptureSource.ActiveWindow && p.VideoBitrateKbps == 23456 && reloaded.UseGpuEngine == wantGpu;
+            W(ok ? "RESULT: PASS - dialog save flow persists" : "RESULT: FAIL - some settings did not persist");
+        }
+        finally
+        {
+            try { if (backup != null) File.WriteAllText(path, backup); else File.Delete(path); } catch { }
+            W("(restored original settings.json)");
+        }
     }
 
     // Active-window FALLBACK: when there is no followable window (desktop focused / last window closed),
