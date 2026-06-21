@@ -135,16 +135,19 @@ public sealed class VideoEditorService
         ExportOptions options,
         string outputPath,
         IProgress<string>? progress = null,
+        IProgress<double>? pct = null,
         CancellationToken ct = default)
     {
         if (segments is null || segments.Count == 0)
             throw new ArgumentException("There are no segments to export.", nameof(segments));
+        double totalSec = 0;
         foreach (var s in segments)
         {
             if (string.IsNullOrWhiteSpace(s.SourceFile) || !File.Exists(s.SourceFile))
                 throw new FileNotFoundException("A segment's source file is missing.", s.SourceFile);
             if (s.Duration <= 0.01)
                 throw new InvalidOperationException("A segment has zero length.");
+            totalSec += s.Duration;
         }
 
         var outDir = Path.GetDirectoryName(outputPath);
@@ -191,7 +194,7 @@ public sealed class VideoEditorService
 
         progress?.Report(options.Format == EditorOutputFormat.Gif ? "Rendering GIF…" : "Rendering…");
         var args = BuildEncodeArguments(segments, options, hasAudio, outputPath);
-        var (exit, err) = await RunAsync(args, ct).ConfigureAwait(false);
+        var (exit, err) = await RunAsync(args, totalSec, pct, ct).ConfigureAwait(false);
 
         if (exit != 0)
         {
@@ -199,7 +202,7 @@ public sealed class VideoEditorService
             if (wantAudio && LooksLikeMissingAudio(err))
             {
                 progress?.Report("A clip's audio couldn't be read — exporting without audio…");
-                var (e2, err2) = await RunAsync(BuildEncodeArguments(segments, CloneMuted(options), hasAudio, outputPath), ct).ConfigureAwait(false);
+                var (e2, err2) = await RunAsync(BuildEncodeArguments(segments, CloneMuted(options), hasAudio, outputPath), totalSec, pct, ct).ConfigureAwait(false);
                 if (e2 != 0)
                 {
                     TryDeleteFile(outputPath);
@@ -389,12 +392,18 @@ public sealed class VideoEditorService
 
     // ------------------------------------------------------------------ process plumbing
 
-    private async Task<(int exit, string stderr)> RunAsync(string arguments, CancellationToken ct)
+    // Overload for callers that don't need progress (probes, fast-copy, two-pass analysis).
+    private Task<(int exit, string stderr)> RunAsync(string arguments, CancellationToken ct)
+        => RunAsync(arguments, 0, null, ct);
+
+    private async Task<(int exit, string stderr)> RunAsync(string arguments, double totalSec, IProgress<double>? pct, CancellationToken ct)
     {
         var psi = new ProcessStartInfo
         {
             FileName = _ffmpegPath,
-            Arguments = arguments,
+            // "-progress pipe:1" emits machine-readable key=value progress to stdout (out_time_us=…), which we
+            // turn into a 0..1 fraction against the known total output duration to drive the UI progress bar.
+            Arguments = "-progress pipe:1 " + arguments,
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardError = true,
@@ -404,7 +413,20 @@ public sealed class VideoEditorService
         using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
         var stderr = new StringBuilder();
         process.ErrorDataReceived += (_, e) => { if (e.Data is not null) stderr.AppendLine(e.Data); };
-        process.OutputDataReceived += (_, _) => { };
+        process.OutputDataReceived += (_, e) =>
+        {
+            var line = e.Data;
+            if (line is null || pct is null || totalSec <= 0) return;
+            if (line.StartsWith("out_time_us=", StringComparison.Ordinal))
+            {
+                if (long.TryParse(line.AsSpan("out_time_us=".Length), out long us) && us >= 0)
+                    pct.Report(Math.Clamp(us / 1_000_000.0 / totalSec, 0.0, 1.0));
+            }
+            else if (line.StartsWith("progress=end", StringComparison.Ordinal))
+            {
+                pct.Report(1.0);
+            }
+        };
 
         if (!process.Start())
             throw new InvalidOperationException("Failed to start the FFmpeg process.");

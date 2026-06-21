@@ -535,8 +535,15 @@ public partial class EditorWindow : Window
             string outPath = BuildOutputPath(opts.Format == EditorOutputFormat.Gif ? ".gif" : ".mp4");
             var snapshot = _segments.Select(s => s.Clone()).ToList();
 
-            var progress = new Progress<string>(m => StatusText.Text = m);
-            await _editor.ExportAsync(snapshot, opts, outPath, progress);
+            string phase = "Rendering…";
+            var progress = new Progress<string>(m => { phase = m; StatusText.Text = m; });
+            var pct = new Progress<double>(f =>
+            {
+                ExportProgress.IsIndeterminate = false;       // a real % arrived → switch from the spinner
+                ExportProgress.Value = f;
+                StatusText.Text = $"{phase} {f * 100:0}%";
+            });
+            await _editor.ExportAsync(snapshot, opts, outPath, progress, pct);
             StatusText.Text = $"Saved: {outPath}";
             NotificationService.ShowClipSaved(outPath);
         }
@@ -553,6 +560,11 @@ public partial class EditorWindow : Window
     private void SetBusy(bool busy)
     {
         _busy = busy;
+        // Show the export progress bar while busy: indeterminate (spinner) during the analysis/fast-copy
+        // phase, then it switches to a real 0..100% fill once ffmpeg starts reporting render progress.
+        ExportProgress.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+        ExportProgress.IsIndeterminate = busy;
+        ExportProgress.Value = 0;
         UpdateExportEnabled();
     }
 

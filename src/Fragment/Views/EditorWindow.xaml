@@ -46,15 +46,21 @@
                 Background="{StaticResource PanelBackgroundBrush}"
                 BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0"
                 Padding="16,10">
-            <Grid>
-                <TextBlock x:Name="StatusText" VerticalAlignment="Center"
-                           Foreground="{StaticResource SubtleForegroundBrush}" TextTrimming="CharacterEllipsis"
-                           Text="Open a video to start. Cut with Split / Delete, add clips to merge, then Export."/>
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                    <Button x:Name="ExportButton" Content="Export" Style="{StaticResource AccentButton}" Click="OnExportClick"/>
-                    <Button Content="Close" Margin="8,0,0,0" Click="OnCloseClick"/>
-                </StackPanel>
-            </Grid>
+            <DockPanel LastChildFill="True">
+                <!-- Export progress: hidden until a render starts; indeterminate during analysis, then fills. -->
+                <ProgressBar x:Name="ExportProgress" DockPanel.Dock="Top" Height="4"
+                             Minimum="0" Maximum="1" Visibility="Collapsed" Margin="0,0,0,8"
+                             Foreground="#00B3FF" BorderThickness="0"/>
+                <Grid>
+                    <TextBlock x:Name="StatusText" VerticalAlignment="Center"
+                               Foreground="{StaticResource SubtleForegroundBrush}" TextTrimming="CharacterEllipsis"
+                               Text="Open a video to start. Cut with Split / Delete, add clips to merge, then Export."/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button x:Name="ExportButton" Content="Export" Style="{StaticResource AccentButton}" Click="OnExportClick"/>
+                        <Button Content="Close" Margin="8,0,0,0" Click="OnCloseClick"/>
+                    </StackPanel>
+                </Grid>
+            </DockPanel>
         </Border>
 
         <Grid Margin="16,8,16,12">
